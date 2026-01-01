@@ -4,6 +4,18 @@
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include "save.h"
+
+#define UNDO 3001
+#define NEW_GAME 1001
+#define LOAD_GAME 2001
+#define SAVE_GAME 2002
+#define TOGGLE_BG 3005
+
+// EXPERIMENTAL
+// This is flag to enable experimental, in development features
+// Such featurures might be unstable or very buggy
+#define EXPERIMENTAL
 
 const char* vertexShader = R"(
 #version 330 core
@@ -229,43 +241,50 @@ Engine::Engine(const char* name, int w, int h, bool* success) {
     initCards();
 
     verticalSpacing = (cardVertices[5] - cardVertices[1]) * 0.12;
+
+#ifdef EXPERIMENTAL
+    MessageBoxA(hwnd, "This build was compiled with experimental features!\nPlease be aware of bugs, errors or undefined behavior.", "Experimental features build", MB_OK | MB_ICONWARNING);
+#endif
+
+    if (SaveExists()) {
+        auto message = MessageBoxA(hwnd, "Saved game has been found. Do you wish to load it?", "Load saved game?", MB_ICONINFORMATION | MB_YESNO);
+        if (message == IDYES) {
+            LoadGame();
+        }
+    }
+}
+
+bool Engine::SaveExists() {
+    if (std::ifstream("save.bin")) return true;
+    else return false;
 }
 
 void Engine::loop() {
-    glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    update();
+    render();
 
-    //render bg
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, bgTexture[selectedBackground]);
-    glBindVertexArray(backgroundQuad.VAO);
-    textureShader.use();
-    glUniform4f(uvLoc, 0.0f, 0.0f, 1.0f, 1.0f);
-    glUniform2f(quadSizeLoc, 1.0f,1.0f);
-    glUniform1i(texLoc, 0);
-    textureShader.passUniformMat4("uMVP", glm::scale(glm::mat4(1.0f),glm::vec3(2.0f,2.0f,1.0f)));
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    glfwSwapBuffers(window);
+    glfwWaitEvents();
+}
 
+void Engine::update() {
     currentMoveIsLegal = false;
 
     double cursorX, cursorY;
     glfwGetCursorPos(window, &cursorX, &cursorY);
-    float ndcX = (2.0f * cursorX) / windowWidth - 1.0f;
-    float ndcY = 1.0f - (2.0f * cursorY) / windowHeight;
+    ndcX = (2.0f * cursorX) / windowWidth - 1.0f;
+    ndcY = 1.0f - (2.0f * cursorY) / windowHeight;
 
-    CardObject deckFace;
-    deckFace.revealed = deck.empty();
-    deckFace.suit = 4;
-    deckFace.rank = deck.empty() ? 2 : 0;
-    renderCard(deckFace, glm::vec3(cardNdcX, cardNdcY+0.5f, 0.0f));
     if (mousePressed) {
         if (!deckMouseHold) {
             deckMouseHold = true;
             if (hoverCard(ndcX, ndcY, glm::vec3(cardNdcX, cardNdcY + 0.55f, 0.0f))) {
+                SavePreviousState();
                 if (!deck.empty()) {
                     revealedDeck.push_back(deck.back());
                     deck.pop_back();
                     playSound(cardSwitchSound);
+                    onCardMoved();
                 }
                 else {
                     deck.reserve(revealedDeck.size());
@@ -277,6 +296,7 @@ void Engine::loop() {
             }
             else {
                 dragActive = false;
+                dontSaveMore = false;
             }
         }
     }
@@ -285,10 +305,6 @@ void Engine::loop() {
     }
     
     if (!revealedDeck.empty()) {
-        if (revealedDeck.size() >= 2) {
-            renderCard(revealedDeck[revealedDeck.size() - 2],revealedDeckPosition);
-        }
-        if(!draggingDeckCard) renderCard(revealedDeck.back(), revealedDeckPosition);
         if (hoverCard(ndcX, ndcY, revealedDeckPosition) && mousePressed) {
             if (draggingStack.empty()) {
                 draggingStack.push_back(revealedDeck.back());
@@ -316,19 +332,20 @@ void Engine::loop() {
             if (mousePressed) {
                 if (hoverCard(ndcX, ndcY, cardPositionww) && columns[i][j].revealed) {
                     if (draggingStack.empty()) {
-                        if (draggingStack.empty()) {
-                            currentMoveIsLegal = false;
-                            homeColumn = i;
-                            std::vector<int> indicesToErase;
-                            for (int z = j; z <= columns[i].size(); z++) {
-                                if (z >= columns[i].size()) break;
-                                draggingStack.push_back(columns[i][z]);
-                                indicesToErase.push_back(z);
-                            }
-                            for (int y = indicesToErase.size() - 1; y >= 0; y--) {
-                                if (indicesToErase[y] < columns[i].size()) {
-                                    columns[i].erase(columns[i].begin() + indicesToErase[y]);
-                                }
+                        SavePreviousState();
+                        dontSaveMore = true;
+
+                        currentMoveIsLegal = false;
+                        homeColumn = i;
+                        std::vector<int> indicesToErase;
+                        for (int z = j; z <= columns[i].size(); z++) {
+                            if (z >= columns[i].size()) break;
+                            draggingStack.push_back(columns[i][z]);
+                            indicesToErase.push_back(z);
+                        }
+                        for (int y = indicesToErase.size() - 1; y >= 0; y--) {
+                            if (indicesToErase[y] < columns[i].size()) {
+                                columns[i].erase(columns[i].begin() + indicesToErase[y]);
                             }
                         }
                     }
@@ -345,24 +362,6 @@ void Engine::loop() {
                 }
             }
         }
-
-        glm::vec3 cardPos3 = glm::vec3(cardNdcX + (i * 0.25f), cardNdcY, 0.0f);
-        CardObject obj;
-        obj.rank = 2;
-        obj.suit = 4;
-        obj.revealed = true;
-        renderCard(obj, cardPos3);
-    }
-
-    int a = 0;
-    for (auto& pile : columns) {
-        int b = 0;
-        for (auto& card : pile) {
-            glm::vec3 cardPos = glm::vec3(cardNdcX + (a * 0.25f), cardNdcY - (b * verticalSpacing), 0.0f);
-            renderCard(card, cardPos);
-            b++;
-        }
-        a++;
     }
 
     bool win[4];
@@ -388,12 +387,6 @@ void Engine::loop() {
             }
         }
 
-        CardObject obj;
-        obj.rank = empty ? 2 : base.back().rank;
-        obj.suit = empty ? 4 : base.back().suit;
-        obj.revealed = true;
-        renderCard(obj, pos);
-
         x++;
     }
 
@@ -408,12 +401,6 @@ void Engine::loop() {
     mousePressed = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
 
     if (!draggingStack.empty() && !draggingDeckCard) {
-        int cardIndex = 0;
-        for (auto& card : draggingStack) {
-            card.draggingPos = glm::vec3(ndcX, ndcY- (cardIndex * 0.1f), 0.0f);
-            renderCard(card, card.draggingPos);
-            cardIndex++;
-        }
 
         if (!mousePressed) {
             if (currentMoveIsLegal && validHover) {
@@ -422,11 +409,14 @@ void Engine::loop() {
                         columns[destinationColumn].push_back(card);
                     }
                     updateColumns = true;
+                    onCardMoved();
                 }
                 else {
+                    SavePreviousState();
                     bases[destinationBase].push_back(draggingStack[0]);
                     hoverOverBase = false;
                     updateColumns = true;
+                    onCardMoved();
                 }
                 playSound(cardPlaceSound);
             }
@@ -440,15 +430,10 @@ void Engine::loop() {
     }
 
     if (draggingDeckCard) {
-        int cardIndex = 0;
-        for (auto& card : draggingStack) {
-            card.draggingPos = glm::vec3(ndcX, ndcY - (cardIndex * 0.1f), 0.0f);
-            renderCard(card, card.draggingPos);
-            cardIndex++;
-        }
-
         if (!mousePressed) {
             if (currentMoveIsLegal) {
+                SavePreviousState();
+
                 if (!hoverOverBase) {
                     for (auto& card : draggingStack) {
                         columns[destinationColumn].push_back(card);
@@ -461,7 +446,10 @@ void Engine::loop() {
 
                 revealedDeck.pop_back();
                 draggingDeckCard = false;
+
+                onCardMoved();
                 playSound(cardPlaceSound);
+                dontSaveMore = false;
             }
             else {
                 for (auto& card : draggingStack) {
@@ -478,16 +466,143 @@ void Engine::loop() {
     }
 
     if (mousePressed && !draggingStack.empty() && validHover) {
-        SetCursor(currentMoveIsLegal ? arrow : illegal);
+        SetCursor(currentMoveIsLegal ? legal : illegal);
     }
     else {
         SetCursor(arrow);
     }
-
-    glfwSwapBuffers(window);
-    glfwWaitEvents();
 }
 
+void Engine::render() {
+    glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    //render bg
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, bgTexture[selectedBackground]);
+    glBindVertexArray(backgroundQuad.VAO);
+    textureShader.use();
+    glUniform4f(uvLoc, 0.0f, 0.0f, 1.0f, 1.0f);
+    glUniform2f(quadSizeLoc, 1.0f, 1.0f);
+    glUniform1i(texLoc, 0);
+    textureShader.passUniformMat4("uMVP", glm::scale(glm::mat4(1.0f), glm::vec3(2.0f, 2.0f, 1.0f)));
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+    // render field
+    CardObject deckFace;
+    deckFace.revealed = deck.empty();
+    deckFace.suit = 4;
+    deckFace.rank = deck.empty() ? 2 : 0;
+    renderCard(deckFace, glm::vec3(cardNdcX, cardNdcY + 0.5f, 0.0f));
+
+    if (!revealedDeck.empty()) {
+        if (revealedDeck.size() >= 2) {
+            renderCard(revealedDeck[revealedDeck.size() - 2], revealedDeckPosition);
+        }
+        if (!draggingDeckCard) renderCard(revealedDeck.back(), revealedDeckPosition);
+    }
+
+    for (int i = 0; i < 7; i++) {
+        glm::vec3 cardPos3 = glm::vec3(cardNdcX + (i * 0.25f), cardNdcY, 0.0f);
+        CardObject obj;
+        obj.rank = 2;
+        obj.suit = 4;
+        obj.revealed = true;
+        renderCard(obj, cardPos3);
+    }
+
+    int a = 0;
+    for (auto& pile : columns) {
+        int b = 0;
+        for (auto& card : pile) {
+            glm::vec3 cardPos = glm::vec3(cardNdcX + (a * 0.25f), cardNdcY - (b * verticalSpacing), 0.0f);
+            renderCard(card, cardPos);
+            b++;
+        }
+        a++;
+    }
+    int x = 0;
+    for (auto& base : bases) {
+        glm::vec3 pos = glm::vec3(cardNdcX + 0.75f + (x * 0.25f), cardNdcY + 0.5f, 0.0f);
+        bool empty = base.empty();
+        
+        CardObject obj;
+        obj.rank = empty ? 2 : base.back().rank;
+        obj.suit = empty ? 4 : base.back().suit;
+        obj.revealed = true;
+        renderCard(obj, pos);
+
+        x++;
+    }
+
+    if (!draggingStack.empty() && !draggingDeckCard) {
+        int cardIndex = 0;
+        for (auto& card : draggingStack) {
+            card.draggingPos = glm::vec3(ndcX, ndcY - (cardIndex * 0.1f), 0.0f);
+            renderCard(card, card.draggingPos);
+            cardIndex++;
+        }
+    }
+
+    if (draggingDeckCard) {
+        int cardIndex = 0;
+        for (auto& card : draggingStack) {
+            card.draggingPos = glm::vec3(ndcX, ndcY - (cardIndex * 0.1f), 0.0f);
+            renderCard(card, card.draggingPos);
+            cardIndex++;
+        }
+    }
+}
+
+void Engine::SavePreviousState() {
+#ifdef EXPERIMENTAL
+    if (dontSaveMore) return;
+
+    GameState previousState = {};
+
+    for (int i = 0; i < 4; ++i) {
+        previousState.bases[i] = bases[i];
+    }
+
+    //for (int i = 0; i < 52; ++i)
+    //    previousState.cards[i] = cards[i];
+
+    for (int i = 0; i < 7; ++i)
+        previousState.columns[i] = columns[i];
+    
+    previousState.deck = deck;
+    previousState.revealedDeck = revealedDeck;
+
+    previousMoves.push_back(previousState);
+#endif
+}
+
+void Engine::LoadPreviousState() {
+#ifdef EXPERIMENTAL
+    if (previousMoves.empty()) return;
+
+    GameState previousMove = previousMoves.back();
+    previousMoves.pop_back();
+
+    for (int i = 0; i < 4; ++i)
+        bases[i] = previousMove.bases[i];
+
+    //for (int i = 0; i < 52; ++i)
+    //    cards[i] = previousMove.cards[i];
+
+    for (int i = 0; i < 7; ++i)
+        columns[i] = previousMove.columns[i];
+
+    deck = previousMove.deck;
+    revealedDeck = previousMove.revealedDeck;
+
+    updateColumns = true;
+#endif
+}
+
+void Engine::onCardMoved() {
+    userSavedGame = false; // no longer same as save state
+}
 
 bool Engine::legalMove(const CardObject& topCard, const CardObject& secondCard) {
     int topRank = topCard.rank == 12 ? 0 : topCard.rank + 1;
@@ -570,7 +685,16 @@ void Engine::initCards() {
     deckIndex = 0;
 }
 
-void Engine::terminate() { glfwTerminate(); }
+void Engine::terminate() {
+    UnregisterHotKey(hwnd, NEW_GAME);
+    UnregisterHotKey(hwnd, SAVE_GAME);
+    UnregisterHotKey(hwnd, LOAD_GAME);
+#ifdef EXPERIMENTAL
+    UnregisterHotKey(hwnd, UNDO);
+#endif
+
+    glfwTerminate();
+}
 bool Engine::running() { return !glfwWindowShouldClose(window); }
 
 bool Engine::hoverCard(float ndcX, float ndcY, glm::vec3 cardPos) {
@@ -600,12 +724,44 @@ void Engine::playSound(LPCWSTR sound) {
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR uIdSubclass,DWORD_PTR dwRefData) {
     Engine* self = reinterpret_cast<Engine*>(dwRefData);
-    if(msg == WM_COMMAND) {
+    switch (msg) {
+    case WM_COMMAND: {
         int id = LOWORD(wparam);
         self->handleMenu(id);
         return 0;
     }
+    case WM_HOTKEY: {
+        int id = wparam;  // wParam = hotkey ID directly
+        self->handleMenu(id);
+        return 0;
+    }
+    }
+    if (msg == WM_CLOSE) {
+        // we check if user saved game, if they saved (flag == true), we simply send IDNO to let WM_CLOSE reach glfw, if they didn't save, we show messagebox and pass whatever user selects
+        auto message = self->GetUserSavedGameFlag() ? IDNO : MessageBoxA(hwnd, "Would you like to save the game before exiting?", "Exiting game", MB_ICONQUESTION | MB_YESNOCANCEL);
+        switch (message) {
+        case IDYES: {
+            bool saveSuccess = self->SaveGame();
+            self->SetUserSavedGameFlag(saveSuccess);
+            if (!saveSuccess) return 0; // early exit since save isn't successfull
+            // fall through
+        }
+        case IDNO:
+            break; // WM_CLOSE reaches GLFW
+        case IDCANCEL:
+            return 0; // WM_CLOSE doesn't reach GLFW
+        }
+    }
     return self->ogWndProc(hwnd, msg, wparam, lparam);
+}
+
+void Engine::registerHotkeys() {
+    RegisterHotKey(hwnd, SAVE_GAME, MOD_CONTROL, 'S');
+    RegisterHotKey(hwnd, LOAD_GAME, MOD_CONTROL, 'L');
+    RegisterHotKey(hwnd, NEW_GAME, MOD_CONTROL, 'N');
+#ifdef EXPERIMENTAL
+    RegisterHotKey(hwnd, UNDO, MOD_CONTROL, 'Z');
+#endif
 }
 
 void Engine::initWinapi() {
@@ -621,12 +777,18 @@ void Engine::initWinapi() {
 
     HMENU hmenu = CreateMenu();
     HMENU gamePopup = CreatePopupMenu();
-    AppendMenu(gamePopup, MF_STRING, 1001, TEXT("New Game"));
+#ifdef EXPERIMENTAL
+    AppendMenu(gamePopup, MF_STRING, UNDO, TEXT("Undo move"));
+#endif
+    AppendMenu(gamePopup, MF_STRING, NEW_GAME, TEXT("New Game"));
     HMENU gameThemePopup = CreatePopupMenu();
     AppendMenu(gameThemePopup, MF_STRING, 1002, TEXT("Green"));
     AppendMenu(gameThemePopup, MF_STRING, 1004, TEXT("Red"));
     AppendMenu(gameThemePopup, MF_STRING, 1003, TEXT("Nature"));
     AppendMenu(gamePopup, MF_POPUP, (UINT_PTR)gameThemePopup, TEXT("Theme"));
+    AppendMenu(gamePopup, MF_SEPARATOR, 0, 0);
+    AppendMenu(gamePopup, MF_STRING, SAVE_GAME, TEXT("Save game"));
+    AppendMenu(gamePopup, MF_STRING, LOAD_GAME, TEXT("Load game"));
     AppendMenu(gamePopup, MF_SEPARATOR, 0, 0);
     AppendMenu(gamePopup, MF_STRING, 1005, TEXT("Exit"));
     AppendMenu(hmenu, MF_POPUP, (UINT_PTR)gamePopup, TEXT("Game"));
@@ -638,13 +800,44 @@ void Engine::initWinapi() {
 
     arrow = LoadCursor(NULL, IDC_ARROW);
     illegal = LoadCursor(NULL, IDC_NO);
+    legal = LoadCursor(NULL, IDC_HAND);
+
+    registerHotkeys();
+}
+
+bool Engine::SaveGame() {
+    if (SaveExists()) {
+        // TODO: Make save file name selectable
+        auto message = MessageBoxA(hwnd, "Save file 'save.bin' already exists! Override?", "Warning", MB_ICONWARNING | MB_YESNO);
+        if (message == IDNO) {
+            return false;
+        }
+    }
+    Save(cards, columns, bases, deck, revealedDeck);
+
+    return true;
+}
+
+void Engine::LoadGame() {
+    Load(cards, columns, bases, deck, revealedDeck);
 }
 
 void Engine::handleMenu(int id) {
     switch (id) {
-    case 1001:
-        initCards();
+    case NEW_GAME: {
+        auto message = MessageBoxA(hwnd, "Would you like to save this game before starting a new one?", "New game", MB_YESNOCANCEL | MB_ICONQUESTION);
+        switch (message) {
+        case IDYES:
+            if (!(userSavedGame = SaveGame())) break;
+            // fall through
+        case IDNO:
+            initCards();
+            break;
+        case IDCANCEL:
+            break;
+        }
         break;
+    }
     case 1002:
     case 1003:
     case 1004: {
@@ -660,5 +853,26 @@ void Engine::handleMenu(int id) {
         MessageBoxA(NULL, "Made by spikest3r\nolehsheremeta.com", "About Solitaire", MB_OK | MB_ICONINFORMATION);
         break;
     }
+
+    case SAVE_GAME:
+    {
+        userSavedGame = SaveGame();
+        break;
+    }
+    case LOAD_GAME:
+    {
+        auto message = MessageBoxA(hwnd, "This will end the current game. Unsaved game will be lost. Load the save anyway?", "Warning", MB_ICONWARNING | MB_YESNO);
+        if (message == IDYES) {
+            LoadGame();
+        }
+        break;
+    }
+#ifdef EXPERIMENTAL
+    case UNDO:
+    {
+        LoadPreviousState();
+        break;
+    }
+#endif
     }
 }

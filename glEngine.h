@@ -14,8 +14,17 @@
 #include <random>
 #include <mmsystem.h>
 #include <commctrl.h>
+#include <fstream>
+
 #pragma comment(lib, "winmm.lib") 
 #pragma comment(lib, "Comctl32.lib")
+
+struct GameState {
+	Pile columns[7];
+	std::vector<CardObject> deck;
+	std::vector<CardObject> revealedDeck;
+	Pile bases[4];
+};
 
 class Engine {
 public:
@@ -26,7 +35,15 @@ public:
 	bool running();
 	WNDPROC ogWndProc;
 	void handleMenu(int id);
+	bool SaveGame();
+	void LoadGame();
+	void SetUserSavedGameFlag(bool flag) { userSavedGame = flag; }
+	bool GetUserSavedGameFlag() { return userSavedGame; }
 private:
+	void update();
+	void render();
+	float ndcX, ndcY;
+
 	unsigned int atlasTexture;
 	unsigned int bgTexture[3];
 	int selectedBackground = 0;
@@ -46,14 +63,17 @@ private:
 	Pile columns[7];
 	std::vector<CardObject> deck;
 	std::vector<CardObject> revealedDeck;
+	Pile bases[4];
+
+	bool dontSaveMore = false;
+	std::vector<GameState> previousMoves;
+
 	bool legalMove(const CardObject& topCard, const CardObject& secondCard);
 	bool currentMoveIsLegal = false;
 	bool oldCursor = false; // for move legality cursor
 	bool hoverCard(float ndcX, float ndcY, glm::vec3 cardPos);
 
 	Resource* resources;
-
-	Pile bases[4];
 
 	std::vector<CardObject> draggingStack;
 	int homeColumn;
@@ -84,11 +104,20 @@ private:
 	bool loadSounds();
 	void playSound(LPCWSTR sound);
 
+	void SavePreviousState();
+	void LoadPreviousState();
+
 	LPCWSTR cardPlaceSound;
 	LPCWSTR cardSwitchSound;
 
 	void initWinapi();
+	void registerHotkeys();
 	HWND hwnd;
 
-	HCURSOR arrow, illegal,drag;
+	HCURSOR arrow, illegal, legal;
+
+	bool userSavedGame = false;
+
+	bool SaveExists();
+	void onCardMoved();
 };

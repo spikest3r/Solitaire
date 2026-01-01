@@ -13,7 +13,19 @@ This game loads resources from DLL.
 
 * Sound effects for cards
 
-* Cursor changes when move is invalid
+* Cursor changes whether move is legal or not
+
+* Save/load progress
+
+* Hotkeys
+
+    * CTRL-S / CTRL-L - Save/Load
+
+    * CTRL-N - New game
+
+    * CTRL-Z - Undo
+
+* Undo move (**still in development, expect bugs**)
 
 ## Dependencies
 
@@ -26,3 +38,5 @@ This game loads resources from DLL.
 ### Additional notes
 
 You need to compile DLL from resoucred in ```res``` folder.
+
+Right now there is ```EXPERIMENTAL``` flag you need to define if you would like to test beta features like undo moves (as of now). Please be aware this could lead to bugs in game.
