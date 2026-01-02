@@ -15,3 +15,10 @@ struct CardObject {
 };
 
 using Pile = std::vector<CardObject>;
+
+struct GameState {
+	Pile columns[7];
+	std::vector<CardObject> deck;
+	std::vector<CardObject> revealedDeck;
+	Pile bases[4];
+};

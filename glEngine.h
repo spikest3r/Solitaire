@@ -15,16 +15,10 @@
 #include <mmsystem.h>
 #include <commctrl.h>
 #include <fstream>
+#include <thread>
 
 #pragma comment(lib, "winmm.lib") 
 #pragma comment(lib, "Comctl32.lib")
-
-struct GameState {
-	Pile columns[7];
-	std::vector<CardObject> deck;
-	std::vector<CardObject> revealedDeck;
-	Pile bases[4];
-};
 
 class Engine {
 public:
@@ -39,7 +33,30 @@ public:
 	void LoadGame();
 	void SetUserSavedGameFlag(bool flag) { userSavedGame = flag; }
 	bool GetUserSavedGameFlag() { return userSavedGame; }
+	HWND Get_hStatus() { return hStatus; }
+
+	bool pauseTimer = false;
+	void KillGameTimer();
+	void ResetGameTimer(int time);
+	int GetTime() { return time; }
 private:
+	bool isCursorArrow = true;
+	bool isRunning = true;
+
+	// status messages variable
+	void PushStatusMessage(LPCWSTR statusMessage);
+	std::thread statusMessageThread;
+	int statusMessageTime = 0;
+	bool statusMessageDirty = false;
+	const int statusMessageTimeout = 3000; // 3 seconds
+	void StatusThreadFunc();
+
+	// timer variables
+	std::thread timerThread;
+	bool timerRunning = false;
+	int time;
+	void TimerThreadFunc();
+
 	void update();
 	void render();
 	float ndcX, ndcY;
@@ -47,7 +64,9 @@ private:
 	unsigned int atlasTexture;
 	unsigned int bgTexture[3];
 	int selectedBackground = 0;
-	float windowWidth, windowHeight;
+
+	float windowWidth, windowHeight; // window size
+
 	float cardAspect, cardScale, singleCardPixelWidth;
 	void renderCard(CardObject object, glm::vec3 position);
 	Shader textureShader;
@@ -105,14 +124,20 @@ private:
 	void playSound(LPCWSTR sound);
 
 	void SavePreviousState();
-	void LoadPreviousState();
+	bool LoadPreviousState(bool* isLast);
+	void SetUndoAvailability(bool flag);
 
 	LPCWSTR cardPlaceSound;
 	LPCWSTR cardSwitchSound;
 
 	void initWinapi();
 	void registerHotkeys();
+	void createStatusBar();
 	HWND hwnd;
+	HWND hStatus; // bottom status bar
+
+	// window menus
+	HMENU hmenu, gamePopup;
 
 	HCURSOR arrow, illegal, legal;
 
