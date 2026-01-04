@@ -36,9 +36,15 @@ public:
 	HWND Get_hStatus() { return hStatus; }
 
 	bool pauseTimer = false;
+	bool pauseGame = false;
 	void KillGameTimer();
 	void ResetGameTimer(int time);
 	int GetTime() { return time; }
+
+	void registerHotkeys();
+	void killHotkeys();
+
+	int ShowUserMessage(const char* message, const char* caption, UINT type, bool ensureNoGamePause = false);
 private:
 	bool isCursorArrow = true;
 	bool isRunning = true;
@@ -51,25 +57,35 @@ private:
 	const int statusMessageTimeout = 3000; // 3 seconds
 	void StatusThreadFunc();
 
-	// timer variables
+	// timer variables and game stats
+	int moves = 0;
+	int time;
+
 	std::thread timerThread;
 	bool timerRunning = false;
-	int time;
 	void TimerThreadFunc();
 
+	void UpdateMovesStatusText();
+
 	void update();
-	void render();
+	void render(bool playAnim = false);
 	float ndcX, ndcY;
 
 	unsigned int atlasTexture;
 	unsigned int bgTexture[3];
 	int selectedBackground = 0;
 
+	unsigned int framebuffer;
+	unsigned int texColorBuffer;
+	GLuint quadVAO;
+	bool createFramebuffer();
+
 	float windowWidth, windowHeight; // window size
 
 	float cardAspect, cardScale, singleCardPixelWidth;
 	void renderCard(CardObject object, glm::vec3 position);
 	Shader textureShader;
+	Shader quadShader;
 	glm::mat4 proj;
 	GLbuffer cardQuad;
 	GLbuffer backgroundQuad;
@@ -96,6 +112,7 @@ private:
 
 	std::vector<CardObject> draggingStack;
 	int homeColumn;
+	int homeBase;
 	int destinationColumn;
 	bool updateColumns = false;
 	int deckIndex = 0;
@@ -106,7 +123,11 @@ private:
 	bool hoverOverBase = false;
 	bool dragActive = false;
 
-	bool winning = true;
+	bool winning = false;
+	bool isWinningAnimationPlaying = false;
+	float winningAnimationTime = 0;
+
+	float r = 0.0f;
 
 	int g_cardIndex = 0;
 
@@ -131,7 +152,6 @@ private:
 	LPCWSTR cardSwitchSound;
 
 	void initWinapi();
-	void registerHotkeys();
 	void createStatusBar();
 	HWND hwnd;
 	HWND hStatus; // bottom status bar

@@ -27,6 +27,10 @@ This game loads resources from DLL.
 
 * Undo move
 
+* Simplistic win animation
+
+* Game timer (with pause/resume feature)
+
 ## Dependencies
 
 * GLFW3 and GLFW3 Native

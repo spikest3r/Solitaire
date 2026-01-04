@@ -10,7 +10,8 @@ void Save(
     const std::vector<CardObject>& deck,
     const std::vector<CardObject>& revealedDeck,
     const std::vector<GameState>& previousMoves,
-    const int& time
+    const int& time,
+    const int& moves
 );
 
 void Load(
@@ -20,6 +21,7 @@ void Load(
     std::vector<CardObject>& deck,
     std::vector<CardObject>& revealedDeck,
     std::vector<GameState>& previousMoves,
-    int& time
+    int& time,
+    int& moves
 );
 

@@ -13,6 +13,7 @@
 #define LOAD_GAME 2001
 #define SAVE_GAME 2002
 #define TOGGLE_BG 3005
+#define PAUSE 3006
 
 #define WM_UPDATE_TIMER (WM_USER+1)
 
@@ -55,6 +56,44 @@ float bgVertices[8] = {
     -0.5f,0.5f,
 };
 unsigned int cardIndices[] = { 0,1,2, 2,3,0 };
+
+float quadVertices[] = {
+    // x,    y,    u,  v
+    -1.0f, -1.0f, 0.0f, 0.0f,  // bottom-left
+     1.0f, -1.0f, 1.0f, 0.0f,  // bottom-right
+    -1.0f,  1.0f, 0.0f, 1.0f,  // top-left
+
+    -1.0f,  1.0f, 0.0f, 1.0f,  // top-left
+     1.0f, -1.0f, 1.0f, 0.0f,  // bottom-right
+     1.0f,  1.0f, 1.0f, 1.0f   // top-right
+};
+
+const char* quadVertex = R"(#version 330 core
+
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aTexCoord;
+
+out vec2 TexCoord;
+
+void main()
+{
+    gl_Position = vec4(aPos.xy, 0.0, 1.0);
+    TexCoord = aTexCoord;
+}
+)";
+
+const char* quadFragment = R"(#version 330 core
+
+out vec4 FragColor;
+in vec2 TexCoord;
+
+uniform sampler2D uTexture;
+
+void main()
+{
+    FragColor = texture(uTexture, TexCoord);
+}
+)";
 
 bool Engine::loadAtlas() {
     DWORD atlasSize;
@@ -170,16 +209,74 @@ CardUV Engine::getCardUV(int rank, int s) {
 }
 
 void Engine::TimerThreadFunc() {
-    while (timerRunning) { // invalidate thread with overriding time variable
-        if (!pauseTimer) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+    auto last = std::chrono::steady_clock::now();
+    std::chrono::milliseconds acc{ 0 };
+
+    while (timerRunning) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+        auto now = std::chrono::steady_clock::now();
+
+        if (pauseTimer || pauseGame) {
+            last = now;
+            continue;
+        }
+
+        acc += std::chrono::duration_cast<std::chrono::milliseconds>(now - last);
+        last = now;
+
+        if (acc >= std::chrono::seconds(1)) {
+            acc -= std::chrono::seconds(1);
             time++;
             PostMessage(hwnd, WM_UPDATE_TIMER, 0, 0);
         }
-        else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
     }
+}
+
+bool Engine::createFramebuffer() {
+    // init full screen quad
+    GLuint quadVBO;
+    glGenVertexArrays(1, &quadVAO);
+    glGenBuffers(1, &quadVBO);
+
+    glBindVertexArray(quadVAO);
+
+    glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+
+    // position attribute
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+
+    // texcoord attribute
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+
+    // create framebuffer
+    glGenFramebuffers(1, &framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+
+    // color texture
+    glGenTextures(1, &texColorBuffer);
+    glBindTexture(GL_TEXTURE_2D, texColorBuffer);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, windowWidth, windowHeight, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL); // change 800x600 to your size
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texColorBuffer, 0);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        MessageBoxA(hwnd, "Failed to initialize OpenGL resources", "Engine error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    quadShader = Shader(quadVertex, quadFragment);
+
+    return true;
 }
 
 Engine::Engine(const char* name, int w, int h, bool* success) {
@@ -229,6 +326,10 @@ Engine::Engine(const char* name, int w, int h, bool* success) {
         *success = false;
         return;
     }
+    if (!createFramebuffer()) {
+        *success = false;
+        return;
+    }
 
     proj = glm::ortho(0.0f, (float)windowWidth, 0.0f, (float)windowHeight);
 
@@ -264,7 +365,7 @@ Engine::Engine(const char* name, int w, int h, bool* success) {
 #endif
 
     if (SaveExists()) {
-        auto message = MessageBoxA(hwnd, "Saved game has been found. Do you wish to load it?", "Load saved game?", MB_ICONINFORMATION | MB_YESNO);
+        auto message = ShowUserMessage("Saved game has been found. Do you wish to load it?", "Load saved game?", MB_ICONINFORMATION | MB_YESNO);
         if (message == IDYES) {
             LoadGame();
         }
@@ -285,14 +386,57 @@ bool Engine::SaveExists() {
 }
 
 void Engine::loop() {
-    update();
-    render();
+    if (!winning) {
+        update();
+    }
+    else {
+        if (!isWinningAnimationPlaying) {
+            isWinningAnimationPlaying = true;
+
+            // prepare animation
+            winningAnimationTime = 0;
+            KillGameTimer();
+        }
+    }
+    
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glViewport(0, 0, windowWidth, windowHeight);
+
+    render(isWinningAnimationPlaying);
+    if (isWinningAnimationPlaying) {
+        winningAnimationTime += 0.01f;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, windowWidth, windowHeight);
+
+    glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    quadShader.use();
+
+    glBindVertexArray(quadVAO);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texColorBuffer);
+
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+
+    if ((isWinningAnimationPlaying && !winning) || glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
+        char message[256];
+        sprintf_s(message, "You won!\nTime: %i\nMoves: %i", time, moves);
+        ShowUserMessage(message, "Congratulations!", MB_OK | MB_ICONINFORMATION);
+        initCards();
+        ResetGameTimer(0);
+    }
 
     glfwSwapBuffers(window);
-    glfwWaitEvents();
+    glfwPollEvents();
 }
 
 void Engine::update() {
+    if (pauseGame) return; // game is paused
+
     currentMoveIsLegal = false;
 
     double cursorX, cursorY;
@@ -310,7 +454,7 @@ void Engine::update() {
                     revealedDeck.push_back(deck.back());
                     deck.pop_back();
                     playSound(cardSwitchSound);
-                    onCardMoved();
+                    onCardMoved(); // from deck to revealed deck
                 }
                 else {
                     deck.reserve(revealedDeck.size());
@@ -401,12 +545,15 @@ void Engine::update() {
         if (mousePressed) {
             if (hoverCard(ndcX, ndcY, pos)) {
                 if (draggingStack.empty()) {
-                    SavePreviousState();
-                    dontSaveMore = true;
+                    if (!base.empty()) {
+                        SavePreviousState();
+                        dontSaveMore = true;
 
-                    // drag from base
-                    draggingStack.push_back(base.back());
-                    base.pop_back();
+                        // drag from base
+                        homeBase = x;
+                        draggingStack.push_back(base.back());
+                        base.pop_back();
+                    }
                 }
                 else {
                     // drag to base
@@ -447,14 +594,15 @@ void Engine::update() {
                         columns[destinationColumn].push_back(card);
                     }
                     updateColumns = true;
-                    onCardMoved();
+                    if(homeColumn != destinationColumn) onCardMoved(); // from column to column
                 }
                 else {
                     SavePreviousState();
                     bases[destinationBase].push_back(draggingStack[0]);
                     hoverOverBase = false;
                     updateColumns = true;
-                    onCardMoved();
+                    
+                    if(destinationBase != homeBase) onCardMoved(); // from column to base
                 }
                 playSound(cardPlaceSound);
             }
@@ -488,7 +636,7 @@ void Engine::update() {
                 revealedDeck.pop_back();
                 draggingDeckCard = false;
 
-                onCardMoved();
+                onCardMoved(); // from revealed deck to base
                 playSound(cardPlaceSound);
                 dontSaveMore = false;
             }
@@ -501,12 +649,6 @@ void Engine::update() {
         }
     }
 
-    if (winning) {
-        time = -1;
-        MessageBoxA(NULL, "You won!", "Congratulations!", MB_OK | MB_ICONINFORMATION);
-        initCards();
-    }
-
     if (mousePressed && !draggingStack.empty() && validHover) {
         SetCursor(currentMoveIsLegal ? legal : illegal);
         isCursorArrow = false;
@@ -515,22 +657,56 @@ void Engine::update() {
         isCursorArrow = true; // avoid hammering api to always set same cursor
         SetCursor(arrow);
     }
+
+    if (!mousePressed) hoverOverBase = false;
 }
 
-void Engine::render() {
+void Engine::render(bool playAnim) {
     glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    if(!playAnim) glClear(GL_COLOR_BUFFER_BIT);
 
-    //render bg
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, bgTexture[selectedBackground]);
-    glBindVertexArray(backgroundQuad.VAO);
-    textureShader.use();
-    glUniform4f(uvLoc, 0.0f, 0.0f, 1.0f, 1.0f);
-    glUniform2f(quadSizeLoc, 1.0f, 1.0f);
-    glUniform1i(texLoc, 0);
-    textureShader.passUniformMat4("uMVP", glm::scale(glm::mat4(1.0f), glm::vec3(2.0f, 2.0f, 1.0f)));
-    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    if (!playAnim) {
+        //render bg
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, bgTexture[selectedBackground]);
+        glBindVertexArray(backgroundQuad.VAO);
+        textureShader.use();
+        glUniform4f(uvLoc, 0.0f, 0.0f, 1.0f, 1.0f);
+        glUniform2f(quadSizeLoc, 1.0f, 1.0f);
+        glUniform1i(texLoc, 0);
+        textureShader.passUniformMat4("uMVP", glm::scale(glm::mat4(1.0f), glm::vec3(2.0f, 2.0f, 1.0f)));
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    }
+    else {
+        int x = 0;
+        if(r < 0.2f) r = (rand() / (float)RAND_MAX) + 0.2f;
+        for (auto& base : bases) {
+            if (base.empty()) {
+                winning = false;
+                return;
+            }
+            float y = (cardNdcY + 0.5f - winningAnimationTime) + sin(winningAnimationTime * 10) * r;
+            glm::vec3 pos = glm::vec3(cardNdcX + 0.75f + (x * 0.25f) - winningAnimationTime, y, 0.0f);
+
+            CardObject obj;
+            obj.rank = base.back().rank;
+            obj.suit = base.back().suit;
+            obj.revealed = true;
+            renderCard(obj, pos);
+
+            if (winningAnimationTime > 1.8f) {
+                base.pop_back();
+            }
+
+            x++;
+        }
+
+        if (winningAnimationTime > 1.8f) {
+            winningAnimationTime = 0;
+            r = (rand() / (float)RAND_MAX);
+        }
+        return;
+    }
 
     // render field
     CardObject deckFace;
@@ -565,6 +741,7 @@ void Engine::render() {
         }
         a++;
     }
+
     int x = 0;
     for (auto& base : bases) {
         glm::vec3 pos = glm::vec3(cardNdcX + 0.75f + (x * 0.25f), cardNdcY + 0.5f, 0.0f);
@@ -650,6 +827,8 @@ bool Engine::LoadPreviousState(bool* isLast) {
 
 void Engine::onCardMoved() {
     userSavedGame = false; // no longer same as save state
+    moves++;
+    UpdateMovesStatusText();
 }
 
 bool Engine::legalMove(const CardObject& topCard, const CardObject& secondCard) {
@@ -682,7 +861,8 @@ void Engine::initCards() {
         columns[i].clear();
     }
 
-    winning = true;
+    winning = false;
+    isWinningAnimationPlaying = false;
 
     // 7 rows
     // 4 bases
@@ -734,13 +914,23 @@ void Engine::initCards() {
 
     previousMoves.clear();
     SetUndoAvailability(false); // previousMoves was cleared
+
+    moves = 0;
+    UpdateMovesStatusText();
 }
 
-void Engine::terminate() {
+void Engine::killHotkeys() {
     UnregisterHotKey(hwnd, NEW_GAME);
     UnregisterHotKey(hwnd, SAVE_GAME);
     UnregisterHotKey(hwnd, LOAD_GAME);
     UnregisterHotKey(hwnd, UNDO);
+    UnregisterHotKey(hwnd, PAUSE);
+}
+
+void Engine::terminate() {
+    isRunning = false;
+
+    killHotkeys();
 
     KillGameTimer();
 
@@ -799,11 +989,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT
         SendMessageA(self->Get_hStatus(), SB_SETTEXT, 1, (LPARAM)buf);
         break;
     }
+    case WM_SETFOCUS: {
+        self->pauseTimer = false;
+        self->registerHotkeys();
+        break;
+    }
+    case WM_KILLFOCUS: {
+        self->pauseTimer = true;
+        self->killHotkeys();
+        break;
+    }
+    case WM_ENTERSIZEMOVE:
+    {
+        self->pauseTimer = true;
+        break;
+    }
+    case WM_EXITSIZEMOVE:
+        self->pauseTimer = false;
+        break;
     }
     if (msg == WM_CLOSE) {
-        self->pauseTimer = true;
         // we check if user saved game, if they saved (flag == true), we simply send IDNO to let WM_CLOSE reach glfw, if they didn't save, we show messagebox and pass whatever user selects
-        auto message = self->GetUserSavedGameFlag() ? IDNO : MessageBoxA(hwnd, "Would you like to save the game before exiting?", "Exiting game", MB_ICONQUESTION | MB_YESNOCANCEL);
+        auto message = self->GetUserSavedGameFlag() ? IDNO : self->ShowUserMessage("Would you like to save the game before exiting?", "Exiting game", MB_ICONQUESTION | MB_YESNOCANCEL);
         switch (message) {
         case IDYES: {
             bool saveSuccess = self->SaveGame();
@@ -814,7 +1021,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT
         case IDNO:
             break; // WM_CLOSE reaches GLFW
         case IDCANCEL:
-            self->pauseTimer = false;
             return 0; // WM_CLOSE doesn't reach GLFW
         }
     }
@@ -826,6 +1032,7 @@ void Engine::registerHotkeys() {
     RegisterHotKey(hwnd, LOAD_GAME, MOD_CONTROL, 'L');
     RegisterHotKey(hwnd, NEW_GAME, MOD_CONTROL, 'N');
     RegisterHotKey(hwnd, UNDO, MOD_CONTROL, 'Z');
+    RegisterHotKey(hwnd, PAUSE, MOD_CONTROL, 'P');
 }
 
 void Engine::createStatusBar() {
@@ -844,14 +1051,26 @@ void Engine::createStatusBar() {
         NULL
     );
 
-    // optional: divide into parts
-    int parts[] = { 300, 400, 900, -1 }; // two parts: first 150 px, second takes rest
-    SendMessage(hStatus, SB_SETPARTS, 4, (LPARAM)parts);
+    // divide into equal parts
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    int w = rc.right / 5;
+
+    int parts[] = {
+        w,
+        2 * w,
+        3 * w,
+        4 * w,
+        -1
+    };
+
+    SendMessage(hStatus, SB_SETPARTS, 5, (LPARAM)parts);
 
     // set initial text
     SendMessage(hStatus, SB_SETTEXT, 0, (LPARAM)TEXT("Ready"));
     SendMessage(hStatus, SB_SETTEXT, 1, (LPARAM)TEXT("Time: 0"));
-    SendMessage(hStatus, SB_SETTEXT, 3, (LPARAM)TEXT("v2.1"));
+    SendMessage(hStatus, SB_SETTEXT, 2, (LPARAM)TEXT("Moves: 0"));
+    SendMessage(hStatus, SB_SETTEXT, 4, (LPARAM)TEXT("v3"));
 }
 
 void Engine::initWinapi() {
@@ -882,6 +1101,7 @@ void Engine::initWinapi() {
     AppendMenu(gamePopup, MF_STRING, 1005, TEXT("Exit"));
     AppendMenu(hmenu, MF_POPUP, (UINT_PTR)gamePopup, TEXT("Game"));
     AppendMenu(hmenu, MF_STRING, 1006, TEXT("About"));
+    AppendMenu(hmenu, MF_STRING, PAUSE, TEXT("Pause"));
     SetMenu(hwnd, hmenu);
 
     ogWndProc = (WNDPROC)GetWindowLongPtr(hwnd, GWLP_WNDPROC);
@@ -896,18 +1116,19 @@ void Engine::initWinapi() {
 }
 
 bool Engine::SaveGame() {
+    if (winning) {
+        PushStatusMessage(L"Unable to save!");
+        return false;
+    }
     if (SaveExists()) {
         // TODO: Make save file name selectable
-        pauseTimer = true;
-        auto message = MessageBoxA(hwnd, "Save file 'save.bin' already exists! Override?", "Warning", MB_ICONWARNING | MB_YESNO);
+        auto message = ShowUserMessage("Save file 'save.bin' already exists! Override?", "Warning", MB_ICONWARNING | MB_YESNO);
         if (message == IDNO) {
-            pauseTimer = false;
-            PushStatusMessage(L"Error saving game!");
+            PushStatusMessage(L"Canceled saving");
             return false;
         }
     }
-    Save(cards, columns, bases, deck, revealedDeck, previousMoves, time);
-    pauseTimer = false;
+    Save(cards, columns, bases, deck, revealedDeck, previousMoves, time, moves);
     PushStatusMessage(L"Game saved successfully!");
     return true;
 }
@@ -915,11 +1136,19 @@ bool Engine::SaveGame() {
 void Engine::LoadGame() {
     KillGameTimer();
     int newTime = 0;
-    Load(cards, columns, bases, deck, revealedDeck, previousMoves, newTime);
+    Load(cards, columns, bases, deck, revealedDeck, previousMoves, newTime, moves);
     userSavedGame = true;
     bool isLast = previousMoves.empty();
     SetUndoAvailability(!isLast);
     ResetGameTimer(newTime);
+    UpdateMovesStatusText();
+    PushStatusMessage(L"Loaded game");
+}
+
+void Engine::UpdateMovesStatusText() {
+    TCHAR buf[16];
+    swprintf(buf, 16, L"Moves: %i", moves);
+    SendMessageA(hStatus, SB_SETTEXT, 2, (LPARAM)buf);
 }
 
 void Engine::KillGameTimer() {
@@ -942,17 +1171,16 @@ void Engine::ResetGameTimer(int t) {
 void Engine::handleMenu(int id) {
     switch (id) {
     case NEW_GAME: {
-        pauseTimer = true;
-        auto message = MessageBoxA(hwnd, "Would you like to save this game before starting a new one?", "New game", MB_YESNOCANCEL | MB_ICONQUESTION);
+        auto message = ShowUserMessage("Would you like to save this game before starting a new one?", "New game", MB_YESNOCANCEL | MB_ICONQUESTION);
         switch (message) {
         case IDYES:
             if (!(userSavedGame = SaveGame())) break;
             // fall through
         case IDNO:
             initCards();
-            pauseTimer = false;
             KillGameTimer();
             ResetGameTimer(0);
+            pauseGame = false;
             break;
         case IDCANCEL:
             break;
@@ -964,6 +1192,7 @@ void Engine::handleMenu(int id) {
     case 1004: {
         int bg = -(1002 - id);
         selectedBackground = bg;
+        PushStatusMessage(L"Changed background");
         break;
     }
     case 1005:
@@ -971,9 +1200,7 @@ void Engine::handleMenu(int id) {
         break;
     case 1006:
     {
-        pauseTimer = true;
-        MessageBoxA(NULL, "Made by spikest3r\nolehsheremeta.com", "About Solitaire", MB_OK | MB_ICONINFORMATION);
-        pauseTimer = false;
+        ShowUserMessage("Made by spikest3r\nolehsheremeta.com", "About Solitaire", MB_OK | MB_ICONINFORMATION);
         break;
     }
 
@@ -984,22 +1211,27 @@ void Engine::handleMenu(int id) {
     }
     case LOAD_GAME:
     {
-        pauseTimer = true;
-        auto message = MessageBoxA(hwnd, "This will end the current game. Unsaved game will be lost. Load the save anyway?", "Warning", MB_ICONWARNING | MB_YESNO);
+        auto message = ShowUserMessage("This will end the current game. Unsaved game will be lost. Load the save anyway?", "Warning", MB_ICONWARNING | MB_YESNO);
         if (message == IDYES) {
             LoadGame();
+            pauseGame = false;
         }
-        pauseTimer = false;
         break;
     }
     case UNDO:
     {
+        if (pauseTimer || pauseGame) return;
         bool isLast = false;
         bool success = LoadPreviousState(&isLast); // fetch whether move we reverted to was last in list
         PushStatusMessage(success ? L"Undid move" : L"Nothing to undo");
         SetUndoAvailability(!isLast);
         userSavedGame = false; // game state has changed
+        if (moves > 0) moves--;
+        UpdateMovesStatusText();
         break;
+    }
+    case PAUSE: {
+        pauseGame = !pauseGame;
     }
     }
 }
@@ -1016,18 +1248,37 @@ void Engine::PushStatusMessage(LPCWSTR statusMessage) {
 
 void Engine::StatusThreadFunc() {
     constexpr int timeIncrement = 10;
+    bool previousGamePauseState = pauseGame;
+    bool previousWin = false;
 
     while (isRunning) {
         std::this_thread::sleep_for(std::chrono::milliseconds(timeIncrement));
+
+        auto pauseState = pauseGame || pauseTimer;
+
+        LPCWSTR defaultLabel = winning ? L"You won! Yay :3 - \'Space\' to skip" : (pauseState ? L"Game is paused" : L"Ready");
+        if (pauseState != previousGamePauseState || winning != previousWin) {
+            previousGamePauseState = pauseState;
+            previousWin = winning;
+            statusMessageDirty = true;
+        }
 
         if (statusMessageTime > 0) {
             statusMessageTime-=timeIncrement;
         }
         else {
             if (statusMessageDirty) {
-                SendMessage(hStatus, SB_SETTEXT, 0, (LPARAM)TEXT("Ready"));
+                PostMessage(hStatus, SB_SETTEXT, 0, (LPARAM)defaultLabel);
                 statusMessageDirty = false;
             }
         }
     }
+}
+
+int Engine::ShowUserMessage(const char* message, const char* caption, UINT type, bool ensureNoGamePause) {
+    pauseTimer = true;
+    auto result = MessageBoxA(hwnd, message, caption, type);
+    pauseTimer = false;
+    if (ensureNoGamePause) pauseGame = false; // force unpause
+    return result;
 }

@@ -8,12 +8,17 @@ void Save(
     const std::vector<CardObject>& deck,
     const std::vector<CardObject>& revealedDeck,
     const std::vector<GameState>& previousMoves,
-    const int& time
+    const int& time,
+    const int& moves
 ) {
     std::ofstream out("save.bin", std::ios::binary);
     if (!out) return;
 
+    // time
     out.write((char*)&time, sizeof(int));
+
+    // moves
+    out.write((char*)&moves, sizeof(int));
 
     // cards
     out.write((char*)cards, sizeof(cards));
@@ -87,12 +92,17 @@ void Load(
     std::vector<CardObject>& deck,
     std::vector<CardObject>& revealedDeck,
     std::vector<GameState>& previousMoves,
-    int& time
+    int& time,
+    int& moves
 ) {
     std::ifstream in("save.bin", std::ios::binary);
     if (!in) return;
 
+    // time
     in.read((char*)&time, sizeof(int));
+
+    // moves
+    in.read((char*)&moves, sizeof(int));
 
     // cards
     in.read((char*)cards, sizeof(cards));
