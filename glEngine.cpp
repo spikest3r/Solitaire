@@ -367,7 +367,10 @@ Engine::Engine(const char* name, int w, int h, bool* success) {
     if (SaveExists()) {
         auto message = ShowUserMessage("Saved game has been found. Do you wish to load it?", "Load saved game?", MB_ICONINFORMATION | MB_YESNO);
         if (message == IDYES) {
-            LoadGame();
+           bool success = LoadGame();
+           if (!success) {
+               ResetGameTimer(0);
+           }
         }
         else {
             ResetGameTimer(0);
@@ -500,7 +503,7 @@ void Engine::update() {
             }
             glm::vec3 cardPositionww = glm::vec3(cardNdcX + (i * 0.25f), cardNdcY - (j * verticalSpacing) + (cardVertices[5] - cardVertices[1]) / 6.5f, 0.0f);
             if (mousePressed) {
-                if (hoverCard(ndcX, ndcY, cardPositionww) && columns[i][j].revealed) {
+                if (hoverCard(ndcX, ndcY, cardPositionww) && columns[i][j].revealed && (columns[i].size() - j == 1 || draggingStack.empty())) {
                     if (draggingStack.empty()) {
                         SavePreviousState();
                         dontSaveMore = true;
@@ -832,6 +835,7 @@ void Engine::onCardMoved() {
 }
 
 bool Engine::legalMove(const CardObject& topCard, const CardObject& secondCard) {
+    if (topCard.rank == 9 && secondCard.rank == 10) return false;
     int topRank = topCard.rank == 12 ? 0 : topCard.rank + 1;
     int secondRank = secondCard.rank == 12 ? 0 : secondCard.rank + 1;
     bool isAlternateColor = ((topCard.suit == 0 || topCard.suit == 1) && (secondCard.suit == 2 || secondCard.suit == 3)) ||
@@ -1070,7 +1074,7 @@ void Engine::createStatusBar() {
     SendMessage(hStatus, SB_SETTEXT, 0, (LPARAM)TEXT("Ready"));
     SendMessage(hStatus, SB_SETTEXT, 1, (LPARAM)TEXT("Time: 0"));
     SendMessage(hStatus, SB_SETTEXT, 2, (LPARAM)TEXT("Moves: 0"));
-    SendMessage(hStatus, SB_SETTEXT, 4, (LPARAM)TEXT("v3"));
+    SendMessage(hStatus, SB_SETTEXT, 4, (LPARAM)TEXT("v3.1"));
 }
 
 void Engine::initWinapi() {
@@ -1133,16 +1137,23 @@ bool Engine::SaveGame() {
     return true;
 }
 
-void Engine::LoadGame() {
+bool Engine::LoadGame() {
     KillGameTimer();
     int newTime = 0;
-    Load(cards, columns, bases, deck, revealedDeck, previousMoves, newTime, moves);
+    try {
+        Load(cards, columns, bases, deck, revealedDeck, previousMoves, newTime, moves);
+    }
+    catch(std::exception& ex) {
+        ShowUserMessage("Failed to load saved game! File might be corrupted or incompatible", "Bad file",MB_OK|MB_ICONERROR);
+        return false;
+    }
     userSavedGame = true;
     bool isLast = previousMoves.empty();
     SetUndoAvailability(!isLast);
     ResetGameTimer(newTime);
     UpdateMovesStatusText();
     PushStatusMessage(L"Loaded game");
+    return true;
 }
 
 void Engine::UpdateMovesStatusText() {
@@ -1213,8 +1224,11 @@ void Engine::handleMenu(int id) {
     {
         auto message = ShowUserMessage("This will end the current game. Unsaved game will be lost. Load the save anyway?", "Warning", MB_ICONWARNING | MB_YESNO);
         if (message == IDYES) {
-            LoadGame();
+            bool success = LoadGame();
             pauseGame = false;
+            if (!success) {
+                return;
+            }
         }
         break;
     }
@@ -1232,6 +1246,7 @@ void Engine::handleMenu(int id) {
     }
     case PAUSE: {
         pauseGame = !pauseGame;
+        break;
     }
     }
 }

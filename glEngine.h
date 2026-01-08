@@ -30,7 +30,7 @@ public:
 	WNDPROC ogWndProc;
 	void handleMenu(int id);
 	bool SaveGame();
-	void LoadGame();
+	bool LoadGame();
 	void SetUserSavedGameFlag(bool flag) { userSavedGame = flag; }
 	bool GetUserSavedGameFlag() { return userSavedGame; }
 	HWND Get_hStatus() { return hStatus; }
