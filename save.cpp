@@ -2,6 +2,7 @@
 #include "cardobject.h"
 
 void Save(
+    std::string path,
     const CardObject(&cards)[52],
     const Pile(&columns)[7],
     const Pile(&bases)[4],
@@ -9,9 +10,10 @@ void Save(
     const std::vector<CardObject>& revealedDeck,
     const std::vector<GameState>& previousMoves,
     const int& time,
-    const int& moves
+    const int& moves,
+    unsigned int currentSeed
 ) {
-    std::ofstream out("save.bin", std::ios::binary);
+    std::ofstream out(path, std::ios::binary);
     if (!out) return;
 
     // time
@@ -83,9 +85,12 @@ void Save(
         out.write((char*)&revSz, sizeof(revSz));
         out.write((char*)gs.revealedDeck.data(), revSz * sizeof(CardObject));
     }
+
+    out.write((char*)&currentSeed, sizeof(unsigned int));
 }
 
 void Load(
+    std::string path,
     CardObject(&cards)[52],
     Pile(&columns)[7],
     Pile(&bases)[4],
@@ -93,9 +98,10 @@ void Load(
     std::vector<CardObject>& revealedDeck,
     std::vector<GameState>& previousMoves,
     int& time,
-    int& moves
+    int& moves,
+    unsigned int& currentSeed
 ) {
-    std::ifstream in("save.bin", std::ios::binary);
+    std::ifstream in(path, std::ios::binary);
     if (!in) return;
 
     // time
@@ -170,5 +176,14 @@ void Load(
         in.read((char*)&revSz, sizeof(revSz));
         gs.revealedDeck.resize(revSz);
         in.read((char*)gs.revealedDeck.data(), revSz * sizeof(CardObject));
+    }
+
+    if (in.peek() != EOF) {
+        in.read((char*)&currentSeed, sizeof(unsigned int));
+    }
+    else {
+        // Compatibility mode: old file detected
+        // You can set it to 0 or generate a new one
+        currentSeed = 0;
     }
 }

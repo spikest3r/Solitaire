@@ -4,6 +4,7 @@
 #include "cardobject.h"
 
 void Save(
+    std::string path,
     const CardObject(&cards)[52],
     const Pile(&columns)[7],
     const Pile(&bases)[4],
@@ -11,10 +12,12 @@ void Save(
     const std::vector<CardObject>& revealedDeck,
     const std::vector<GameState>& previousMoves,
     const int& time,
-    const int& moves
+    const int& moves,
+    unsigned int currentSeed
 );
 
 void Load(
+    std::string path,
     CardObject(&cards)[52],
     Pile(&columns)[7],
     Pile(&bases)[4],
@@ -22,6 +25,7 @@ void Load(
     std::vector<CardObject>& revealedDeck,
     std::vector<GameState>& previousMoves,
     int& time,
-    int& moves
+    int& moves,
+    unsigned int& currentSeed
 );
 

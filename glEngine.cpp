@@ -7,6 +7,7 @@
 #include "save.h"
 #include <stdio.h>
 #include <thread>
+#include <commdlg.h>
 
 #define UNDO 3001
 #define NEW_GAME 1001
@@ -14,6 +15,9 @@
 #define SAVE_GAME 2002
 #define TOGGLE_BG 3005
 #define PAUSE 3006
+#define AUTO_FINISH 3007
+#define GET_SEED 3008
+#define SET_SEED 3009
 
 #define WM_UPDATE_TIMER (WM_USER+1)
 
@@ -364,13 +368,14 @@ Engine::Engine(const char* name, int w, int h, bool* success) {
     MessageBoxA(hwnd, "This build was compiled with experimental features!\nPlease be aware of bugs, errors or undefined behavior.", "Experimental features build", MB_OK | MB_ICONWARNING);
 #endif
 
-    if (SaveExists()) {
-        auto message = ShowUserMessage("Saved game has been found. Do you wish to load it?", "Load saved game?", MB_ICONINFORMATION | MB_YESNO);
+    std::wstring lastPath = LoadLastSavePath();
+    if (!lastPath.empty()) {
+        auto message = ShowUserMessage("Would you like to load last saved game?", "Load saved game?", MB_ICONINFORMATION | MB_YESNO);
         if (message == IDYES) {
-           bool success = LoadGame();
-           if (!success) {
-               ResetGameTimer(0);
-           }
+            bool success = LoadGame(lastPath);
+            if (!success) {
+                ResetGameTimer(0);
+            }
         }
         else {
             ResetGameTimer(0);
@@ -388,12 +393,69 @@ bool Engine::SaveExists() {
     else return false;
 }
 
+void Engine::UpdateDeltaTime() {
+    float currentTime = glfwGetTime();
+    deltaTime = currentTime - previousTime;
+    previousTime = currentTime;
+}
+
 void Engine::loop() {
-    if (!winning) {
+    UpdateDeltaTime();
+
+    if (selectedSaveFile && (!winning && !autoFinishRunning && !pauseGame && !pauseTimer)) {
+        autoSaveCountDown -= deltaTime;
+        if (autoSaveCountDown <= 0.0f) {
+            autoSaveCountDown = 60.0f;
+
+            SaveGame();
+        }
+    }
+
+    if (!winning && !autoFinishRunning) {
         update();
     }
     else {
-        if (!isWinningAnimationPlaying) {
+        if (autoFinishRunning) {
+            float speedMultiplier = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS ? 4.0f : 1.0f;
+            autoFinishTime -= deltaTime * speedMultiplier;
+            if (autoFinishTime <= 0.0f) {
+                autoFinishTime = autoFinishStep;
+
+                // execute auto finish logic
+                int empties = 0;
+                bool shouldBreak = false;
+                for (auto& pile : columns) {
+                    if (pile.size() == 0) {
+                        empties++;
+                        continue;
+                    }
+
+                    int i = 0;
+                    for (auto& lastCard : lastBaseCards) {
+                        if (legalAutoFinishMove(pile.back(), lastCard)) {
+                            bases[i].push_back(pile.back());
+                            pile.pop_back();
+                            lastCard = bases[i].back();
+                            moves++;
+                            UpdateMovesStatusText();
+                            shouldBreak = true;
+                            break;
+                        }
+                        i++;
+                    }
+
+                    if (shouldBreak) break;
+                }
+                if (empties == 7) {
+                    autoFinishRunning = false;
+                    autoFinishAvail = false;
+                    
+                    // win!
+                    winning = true;
+                }
+            }
+        } 
+        else if (!isWinningAnimationPlaying) {
             isWinningAnimationPlaying = true;
 
             // prepare animation
@@ -425,7 +487,7 @@ void Engine::loop() {
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
 
-    if ((isWinningAnimationPlaying && !winning) || glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
+    if (isWinningAnimationPlaying && (!winning || glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)) {
         char message[256];
         sprintf_s(message, "You won!\nTime: %i\nMoves: %i", time, moves);
         ShowUserMessage(message, "Congratulations!", MB_OK | MB_ICONINFORMATION);
@@ -612,7 +674,7 @@ void Engine::update() {
             else {
                 bool isLast;
                 LoadPreviousState(&isLast);
-                SetUndoAvailability(!isLast);
+                SetOptionAvailability(UNDO, !isLast);
                 /*for (auto& card : draggingStack) {
                     columns[homeColumn].push_back(card);
                 }*/
@@ -671,7 +733,8 @@ void Engine::render(bool playAnim) {
     if (!playAnim) {
         //render bg
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, bgTexture[selectedBackground]);
+        if(selectedBackground == 999) glBindTexture(GL_TEXTURE_2D, customBgTexture);
+        else glBindTexture(GL_TEXTURE_2D, bgTexture[selectedBackground]);
         glBindVertexArray(backgroundQuad.VAO);
         textureShader.use();
         glUniform4f(uvLoc, 0.0f, 0.0f, 1.0f, 1.0f);
@@ -797,7 +860,7 @@ void Engine::SavePreviousState() {
     previousState.revealedDeck = revealedDeck;
 
     previousMoves.push_back(previousState);
-    SetUndoAvailability(true); // just pushed previous move
+    SetOptionAvailability(UNDO, true); // just pushed previous move
 }
 
 bool Engine::LoadPreviousState(bool* isLast) {
@@ -832,6 +895,32 @@ void Engine::onCardMoved() {
     userSavedGame = false; // no longer same as save state
     moves++;
     UpdateMovesStatusText();
+
+    if ((deck.size() == 0 && revealedDeck.size() == 0) && !autoFinishAvail) {
+        autoFinishAvail = true;
+        ProposeAutoFinish();
+    }
+}
+
+void Engine::ProposeAutoFinish() {
+    SetOptionAvailability(AUTO_FINISH, true);
+    auto result = MessageBoxA(hwnd, "Do you want to auto-finish?", "Auto-finish", MB_ICONINFORMATION | MB_YESNO);
+    if (result == IDYES) {
+        AutoFinish();
+    }
+}
+
+void Engine::AutoFinish() {
+    pauseGame = true;
+    pauseTimer = true;
+
+    autoFinishRunning = true;
+    for (int i = 0; i < 4; i++) {
+        if (bases[i].size() == 0) lastBaseCards[i] = CardObject{ 0, 0, false };
+        else lastBaseCards[i] = bases[i].back();
+    }
+
+    statusMessageDirty = true; // flush text
 }
 
 bool Engine::legalMove(const CardObject& topCard, const CardObject& secondCard) {
@@ -843,6 +932,18 @@ bool Engine::legalMove(const CardObject& topCard, const CardObject& secondCard) 
     bool isDescendingRank = (topRank - secondRank == 1);
 
     return isAlternateColor && isDescendingRank;
+}
+
+bool Engine::legalAutoFinishMove(const CardObject& topCard, const CardObject& secondCard) {
+    // is pile to base move legal
+    bool emptyBase = !secondCard.revealed;
+    int topRank = topCard.rank == 12 ? 0 : topCard.rank + 1;
+    int secondRank = emptyBase ? -1 : (secondCard.rank == 12 ? 0 : secondCard.rank + 1);
+
+    bool sameSuit = (topCard.suit == secondCard.suit) || emptyBase;
+    bool inOrder = (topRank - secondRank) == 1;
+
+    return (sameSuit && inOrder);
 }
 
 void Engine::renderCard(CardObject object, glm::vec3 position) {
@@ -859,7 +960,7 @@ void Engine::renderCard(CardObject object, glm::vec3 position) {
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 }
 
-void Engine::initCards() {
+void Engine::initCards(int userSeed) {
     ZeroMemory(cards, sizeof(cards));
     for (int i = 0; i < 7; i++) {
         columns[i].clear();
@@ -867,6 +968,8 @@ void Engine::initCards() {
 
     winning = false;
     isWinningAnimationPlaying = false;
+    autoFinishRunning = false;
+    autoFinishAvail = false;
 
     // 7 rows
     // 4 bases
@@ -893,7 +996,8 @@ void Engine::initCards() {
     }
 
     std::random_device rd;
-    std::mt19937 rng(rd());
+    currentSeed = userSeed == 0 ? rd() : userSeed;
+    std::mt19937 rng(currentSeed);
     std::shuffle(cards, cards+52, rng);
 
     g_cardIndex = 0;
@@ -917,13 +1021,19 @@ void Engine::initCards() {
     deckIndex = 0;
 
     previousMoves.clear();
-    SetUndoAvailability(false); // previousMoves was cleared
+    SetOptionAvailability(UNDO, false); // previousMoves was cleared
+    SetOptionAvailability(AUTO_FINISH, false);
 
     moves = 0;
     UpdateMovesStatusText();
+
+    pauseGame = false;
+    selectedSaveFile = false;
 }
 
 void Engine::killHotkeys() {
+    UnregisterHotKey(hwnd, TOGGLE_BG);
+    UnregisterHotKey(hwnd, AUTO_FINISH);
     UnregisterHotKey(hwnd, NEW_GAME);
     UnregisterHotKey(hwnd, SAVE_GAME);
     UnregisterHotKey(hwnd, LOAD_GAME);
@@ -1028,10 +1138,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT
             return 0; // WM_CLOSE doesn't reach GLFW
         }
     }
+
     return self->ogWndProc(hwnd, msg, wparam, lparam);
 }
 
 void Engine::registerHotkeys() {
+    RegisterHotKey(hwnd, TOGGLE_BG, MOD_CONTROL, 'B');
+    RegisterHotKey(hwnd, 2005, MOD_CONTROL | MOD_ALT, 'B');
+    RegisterHotKey(hwnd, AUTO_FINISH, MOD_ALT, 'F');
     RegisterHotKey(hwnd, SAVE_GAME, MOD_CONTROL, 'S');
     RegisterHotKey(hwnd, LOAD_GAME, MOD_CONTROL, 'L');
     RegisterHotKey(hwnd, NEW_GAME, MOD_CONTROL, 'N');
@@ -1074,7 +1188,7 @@ void Engine::createStatusBar() {
     SendMessage(hStatus, SB_SETTEXT, 0, (LPARAM)TEXT("Ready"));
     SendMessage(hStatus, SB_SETTEXT, 1, (LPARAM)TEXT("Time: 0"));
     SendMessage(hStatus, SB_SETTEXT, 2, (LPARAM)TEXT("Moves: 0"));
-    SendMessage(hStatus, SB_SETTEXT, 4, (LPARAM)TEXT("v3.1"));
+    SendMessage(hStatus, SB_SETTEXT, 4, (LPARAM)TEXT("v3.2")); // <3
 }
 
 void Engine::initWinapi() {
@@ -1090,19 +1204,25 @@ void Engine::initWinapi() {
 
     hmenu = CreateMenu();
     gamePopup = CreatePopupMenu();
-    AppendMenu(gamePopup, MF_STRING, UNDO, TEXT("Undo move"));
+    AppendMenu(gamePopup, MF_STRING, UNDO, TEXT("Undo move\tCTRL+Z"));
+    AppendMenu(gamePopup, MF_STRING, AUTO_FINISH, TEXT("Auto-finish\tALT+F"));
     AppendMenu(gamePopup, MF_SEPARATOR, 0, 0);
-    AppendMenu(gamePopup, MF_STRING, NEW_GAME, TEXT("New Game"));
+    AppendMenu(gamePopup, MF_STRING, NEW_GAME, TEXT("New Game\tCTRL+N"));
+    HMENU seedPopup = CreatePopupMenu();
+    AppendMenu(seedPopup, MF_STRING, GET_SEED, TEXT("Get current seed"));
+    AppendMenu(seedPopup, MF_STRING, SET_SEED, TEXT("New game with custom seed"));
+    AppendMenu(gamePopup, MF_POPUP, (UINT_PTR)seedPopup, TEXT("Seed"));
     HMENU gameThemePopup = CreatePopupMenu();
     AppendMenu(gameThemePopup, MF_STRING, 1002, TEXT("Green"));
     AppendMenu(gameThemePopup, MF_STRING, 1004, TEXT("Red"));
     AppendMenu(gameThemePopup, MF_STRING, 1003, TEXT("Nature"));
-    AppendMenu(gamePopup, MF_POPUP, (UINT_PTR)gameThemePopup, TEXT("Theme"));
+    AppendMenu(gameThemePopup, MF_STRING, 2005, TEXT("Custom\tCTRL+ALT+B"));
+    AppendMenu(gamePopup, MF_POPUP, (UINT_PTR)gameThemePopup, TEXT("Theme\tCTRL+B"));
     AppendMenu(gamePopup, MF_SEPARATOR, 0, 0);
-    AppendMenu(gamePopup, MF_STRING, SAVE_GAME, TEXT("Save game"));
-    AppendMenu(gamePopup, MF_STRING, LOAD_GAME, TEXT("Load game"));
+    AppendMenu(gamePopup, MF_STRING, SAVE_GAME, TEXT("Save game\tCTRL+S"));
+    AppendMenu(gamePopup, MF_STRING, LOAD_GAME, TEXT("Load game\tCTRL+L"));
     AppendMenu(gamePopup, MF_SEPARATOR, 0, 0);
-    AppendMenu(gamePopup, MF_STRING, 1005, TEXT("Exit"));
+    AppendMenu(gamePopup, MF_STRING, 1005, TEXT("Exit\tALT+F4"));
     AppendMenu(hmenu, MF_POPUP, (UINT_PTR)gamePopup, TEXT("Game"));
     AppendMenu(hmenu, MF_STRING, 1006, TEXT("About"));
     AppendMenu(hmenu, MF_STRING, PAUSE, TEXT("Pause"));
@@ -1119,29 +1239,86 @@ void Engine::initWinapi() {
     createStatusBar();
 }
 
+std::wstring Engine::ShowOpenDialog(HWND hwnd)
+{
+    WCHAR fileName[MAX_PATH] = L"";
+
+    OPENFILENAME ofn = { 0 };
+    ofn.lStructSize = sizeof(OPENFILENAME);
+    ofn.hwndOwner = hwnd;       // parent window
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrFilter = L"All Files\0*.*\0Text Files\0*.txt\0";
+    ofn.nFilterIndex = 1;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+
+    if (GetOpenFileName(&ofn))
+    {
+        return std::wstring(fileName);
+    }
+
+    return L"";
+}
+
+std::wstring Engine::ShowSaveDialog(HWND hwnd)
+{
+    WCHAR fileName[MAX_PATH] = L"";
+
+    OPENFILENAME ofn = { 0 };
+    ofn.lStructSize = sizeof(OPENFILENAME);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrFilter = L"Text Files\0*.txt\0All Files\0*.*\0";
+    ofn.nFilterIndex = 1;
+    ofn.Flags = OFN_OVERWRITEPROMPT;
+
+    if (GetSaveFileName(&ofn))
+    {
+        return std::wstring(fileName);
+    }
+
+    return L"";
+}
+
 bool Engine::SaveGame() {
     if (winning) {
         PushStatusMessage(L"Unable to save!");
         return false;
     }
-    if (SaveExists()) {
-        // TODO: Make save file name selectable
-        auto message = ShowUserMessage("Save file 'save.bin' already exists! Override?", "Warning", MB_ICONWARNING | MB_YESNO);
-        if (message == IDNO) {
+    if (!selectedSaveFile) {
+        auto rawPath = ShowSaveDialog(hwnd);
+        if (rawPath.empty()) {
             PushStatusMessage(L"Canceled saving");
             return false;
         }
+        std::string path = WideToString(rawPath.c_str());
+        saveFilePath = path;
+        SaveLastSavePath(rawPath);
+        ShowUserMessage("Your game will save every 1 minute automatically to selected save file", "Auto save", MB_OK | MB_ICONINFORMATION);
+        selectedSaveFile = true;
     }
-    Save(cards, columns, bases, deck, revealedDeck, previousMoves, time, moves);
+    Save(saveFilePath,cards, columns, bases, deck, revealedDeck, previousMoves, time, moves, currentSeed);
     PushStatusMessage(L"Game saved successfully!");
     return true;
 }
 
-bool Engine::LoadGame() {
+bool Engine::LoadGame(std::wstring presetPath) {
     KillGameTimer();
     int newTime = 0;
     try {
-        Load(cards, columns, bases, deck, revealedDeck, previousMoves, newTime, moves);
+        auto rawPath = presetPath.empty() ? ShowOpenDialog(hwnd) : presetPath;
+        if (rawPath.empty()) {
+            PushStatusMessage(L"Failed to load save file!");
+            return false;
+        }
+        std::string path = WideToString(rawPath.c_str());
+        Load(path, cards, columns, bases, deck, revealedDeck, previousMoves, newTime, moves, currentSeed);
+        selectedSaveFile = true;
+        saveFilePath = path;
+        SaveLastSavePath(rawPath);
+        autoFinishAvail = deck.size() == 0 && revealedDeck.size() == 0;
+        if (autoFinishAvail) ProposeAutoFinish();
     }
     catch(std::exception& ex) {
         ShowUserMessage("Failed to load saved game! File might be corrupted or incompatible", "Bad file",MB_OK|MB_ICONERROR);
@@ -1149,10 +1326,10 @@ bool Engine::LoadGame() {
     }
     userSavedGame = true;
     bool isLast = previousMoves.empty();
-    SetUndoAvailability(!isLast);
+    SetOptionAvailability(UNDO, !isLast);
     ResetGameTimer(newTime);
     UpdateMovesStatusText();
-    PushStatusMessage(L"Loaded game");
+    if(!autoFinishRunning) PushStatusMessage(L"Loaded game");
     return true;
 }
 
@@ -1206,6 +1383,36 @@ void Engine::handleMenu(int id) {
         PushStatusMessage(L"Changed background");
         break;
     }
+    case 2005: {
+        auto rawPath = ShowOpenDialog(hwnd);
+        if (rawPath.empty()) break;
+        auto path = WideToString(rawPath.c_str());
+        int w, h, c;
+        unsigned char* imageData = stbi_load(path.c_str(), &w, &h, &c, 3);
+        if (!imageData) break;
+        if (customBgTexture != -1) {
+            glDeleteTextures(1, &customBgTexture);
+            customBgTexture = -1;
+        }
+        glGenTextures(1, &customBgTexture);
+        glBindTexture(GL_TEXTURE_2D, customBgTexture);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, imageData);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        stbi_image_free(imageData);
+        selectedBackground = 999;
+        break;
+    }
+    case TOGGLE_BG: {
+        if (selectedBackground < 2)selectedBackground++;
+        else selectedBackground = 0;
+        PushStatusMessage(L"Changed background");
+        break;
+    }
     case 1005:
         glfwSetWindowShouldClose(window, true);
         break;
@@ -1237,22 +1444,90 @@ void Engine::handleMenu(int id) {
         if (pauseTimer || pauseGame) return;
         bool isLast = false;
         bool success = LoadPreviousState(&isLast); // fetch whether move we reverted to was last in list
+        if (success) {
+            autoFinishAvail = deck.size() == 0 && revealedDeck.size() == 0;
+            SetOptionAvailability(AUTO_FINISH, autoFinishAvail);
+        }
         PushStatusMessage(success ? L"Undid move" : L"Nothing to undo");
-        SetUndoAvailability(!isLast);
+        SetOptionAvailability(UNDO, !isLast);
         userSavedGame = false; // game state has changed
         if (moves > 0) moves--;
         UpdateMovesStatusText();
         break;
     }
+    case AUTO_FINISH:
+    {
+        if (autoFinishRunning) return;
+        if (!autoFinishAvail) {
+            PushStatusMessage(L"Auto-finish unavailable!");
+            return;
+        }
+        AutoFinish();
+        SetOptionAvailability(AUTO_FINISH, false);
+        break;
+    }
     case PAUSE: {
         pauseGame = !pauseGame;
+        SetMenuItemText(hmenu, PAUSE, pauseGame ? L"Resume" : L"Pause");
+        break;
+    }
+    case SET_SEED:
+    {
+        initCardsWithSeed();
+        break;
+    }
+    case GET_SEED:
+    {
+        if (currentSeed != 0) {
+            if (OpenClipboard(NULL)) {
+                EmptyClipboard();
+
+                char buffer[64];
+                int count = sprintf_s(buffer, 64, "%u", currentSeed);
+                size_t size = count + 1;
+                HGLOBAL hGlobal = GlobalAlloc(GMEM_MOVEABLE, size);
+                if (hGlobal) {
+                    void* pGlobal = GlobalLock(hGlobal);
+                    if (pGlobal) {
+                        memcpy(pGlobal, buffer, size);
+                        GlobalUnlock(hGlobal);
+
+                        SetClipboardData(CF_TEXT, hGlobal);
+                    }
+                }
+
+                CloseClipboard();
+            }
+        }
+
+        char buffer[256];
+        const char* status = currentSeed == 0 ? "\nNote: this save file doesn't contain seed information" : "\nSeed was copied to your clipboard";
+        sprintf_s(buffer, 256, "Seed: %u%s", currentSeed, status);
+        ShowUserMessage(buffer, "Current seed", MB_ICONINFORMATION | MB_OK);
         break;
     }
     }
 }
 
-void Engine::SetUndoAvailability(bool flag) {
-    EnableMenuItem(gamePopup, UNDO, MF_BYCOMMAND | (flag ? MF_ENABLED : MF_GRAYED));
+void Engine::SetOptionAvailability(UINT option, bool flag) {
+    EnableMenuItem(gamePopup, option, MF_BYCOMMAND | (flag ? MF_ENABLED : MF_GRAYED));
+}
+
+void Engine::SetMenuItemText(HMENU hMenu, UINT itemId, const wchar_t* newText)
+{
+    MENUITEMINFO mii = { 0 };
+    mii.cbSize = sizeof(MENUITEMINFO);
+    mii.fMask = MIIM_STRING;
+    mii.dwTypeData = (LPWSTR)newText;
+
+    SetMenuItemInfo(
+        hMenu,
+        itemId,
+        FALSE,        // FALSE = itemId is command ID, not position
+        &mii
+    );
+
+    DrawMenuBar(hwnd);
 }
 
 void Engine::PushStatusMessage(LPCWSTR statusMessage) {
@@ -1271,7 +1546,17 @@ void Engine::StatusThreadFunc() {
 
         auto pauseState = pauseGame || pauseTimer;
 
-        LPCWSTR defaultLabel = winning ? L"You won! Yay :3 - \'Space\' to skip" : (pauseState ? L"Game is paused" : L"Ready");
+        LPCWSTR defaultLabel;
+        if (winning) {
+            defaultLabel = L"You won! Yay :3 - \'Space\' to skip";
+        }
+        else if (autoFinishRunning) {
+            defaultLabel = L"Auto-finish in progress...";
+        }
+        else {
+            defaultLabel = (pauseState ? L"Game is paused" : L"Ready");
+        }
+
         if (pauseState != previousGamePauseState || winning != previousWin) {
             previousGamePauseState = pauseState;
             previousWin = winning;
@@ -1296,4 +1581,126 @@ int Engine::ShowUserMessage(const char* message, const char* caption, UINT type,
     pauseTimer = false;
     if (ensureNoGamePause) pauseGame = false; // force unpause
     return result;
+}
+
+std::string Engine::WideToString(LPCWSTR wide)
+{
+    if (!wide) return "";
+
+    int strLength
+        = WideCharToMultiByte(CP_UTF8, 0, wide, -1,
+            nullptr, 0, nullptr, nullptr);
+
+    // Create a std::string with the determined length
+    std::string str(strLength, 0);
+
+    // Perform the conversion from LPCWSTR to std::string
+    WideCharToMultiByte(CP_UTF8, 0, wide, -1, &str[0],
+        strLength, nullptr, nullptr);
+
+    // Return the converted std::string
+    return str;
+}
+
+bool Engine::SaveLastSavePath(const std::wstring& path)
+{
+    HKEY hKey;
+    LONG result = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        L"Software\\Solitaire_spikest3r",
+        0,
+        nullptr,
+        REG_OPTION_NON_VOLATILE,
+        KEY_WRITE,
+        nullptr,
+        &hKey,
+        nullptr
+    );
+
+    if (result != ERROR_SUCCESS)
+        return false;
+
+    result = RegSetValueExW(
+        hKey,
+        L"LastSavePath",
+        0,
+        REG_SZ,
+        reinterpret_cast<const BYTE*>(path.c_str()),
+        static_cast<DWORD>((path.size() + 1) * sizeof(wchar_t)) // include null
+    );
+
+    RegCloseKey(hKey);
+    return result == ERROR_SUCCESS;
+}
+
+std::wstring Engine::LoadLastSavePath()
+{
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+        L"Software\\Solitaire_spikest3r",
+        0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return L"";
+
+    wchar_t buffer[MAX_PATH];
+    DWORD size = sizeof(buffer);
+    DWORD type = 0;
+
+    LONG res = RegQueryValueExW(hKey, L"LastSavePath", nullptr, &type,
+        reinterpret_cast<BYTE*>(buffer), &size);
+    RegCloseKey(hKey);
+
+    if (res != ERROR_SUCCESS || type != REG_SZ)
+        return L"";
+
+    return std::wstring(buffer);
+}
+
+// ===============
+// = SEED DIALOG =
+// ===============
+
+
+int g_EnteredNumber = 0;
+
+INT_PTR CALLBACK NumberInputProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_INITDIALOG:
+        return (INT_PTR)TRUE;
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK) {
+            wchar_t buffer[16];
+            GetDlgItemTextW(hDlg, 9901, buffer, 16);
+            g_EnteredNumber = _wtoi(buffer); // Convert wide string to int
+            EndDialog(hDlg, IDOK);
+            return (INT_PTR)TRUE;
+        }
+        if (LOWORD(wParam) == IDCANCEL) {
+            EndDialog(hDlg, IDCANCEL);
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+    return (INT_PTR)FALSE;
+}
+
+void Engine::initCardsWithSeed() {
+    pauseTimer = true;
+    if (DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(102), hwnd, NumberInputProc) == IDOK) {
+        auto message = ShowUserMessage("Would you like to save this game before starting a new one?", "New game", MB_YESNOCANCEL | MB_ICONQUESTION);
+        switch (message) {
+        case IDYES:
+            if (!(userSavedGame = SaveGame())) break;
+            // fall through
+        case IDNO:
+            initCards(g_EnteredNumber);
+            KillGameTimer();
+            ResetGameTimer(0);
+            pauseGame = false;
+            break;
+        case IDCANCEL:
+            break;
+        }
+    }
+    pauseTimer = false;
 }

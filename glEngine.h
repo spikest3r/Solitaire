@@ -30,10 +30,11 @@ public:
 	WNDPROC ogWndProc;
 	void handleMenu(int id);
 	bool SaveGame();
-	bool LoadGame();
+	bool LoadGame(std::wstring presetPath = L"");
 	void SetUserSavedGameFlag(bool flag) { userSavedGame = flag; }
 	bool GetUserSavedGameFlag() { return userSavedGame; }
 	HWND Get_hStatus() { return hStatus; }
+	HMENU GetHMENU() { return hmenu; }
 
 	bool pauseTimer = false;
 	bool pauseGame = false;
@@ -48,6 +49,8 @@ public:
 private:
 	bool isCursorArrow = true;
 	bool isRunning = true;
+
+	bool autoFinishAvail = false;
 
 	// status messages variable
 	void PushStatusMessage(LPCWSTR statusMessage);
@@ -73,6 +76,7 @@ private:
 
 	unsigned int atlasTexture;
 	unsigned int bgTexture[3];
+	unsigned int customBgTexture = -1;
 	int selectedBackground = 0;
 
 	unsigned int framebuffer;
@@ -104,6 +108,7 @@ private:
 	std::vector<GameState> previousMoves;
 
 	bool legalMove(const CardObject& topCard, const CardObject& secondCard);
+	bool legalAutoFinishMove(const CardObject& topCard, const CardObject& secondCard);
 	bool currentMoveIsLegal = false;
 	bool oldCursor = false; // for move legality cursor
 	bool hoverCard(float ndcX, float ndcY, glm::vec3 cardPos);
@@ -140,13 +145,21 @@ private:
 	float verticalSpacing;
 	glm::vec3 revealedDeckPosition = glm::vec3(cardNdcX + 0.25f, cardNdcY + 0.5f, 0.0f);
 
-	void initCards();
+	void initCards(int userSeed = 0);
 	bool loadSounds();
 	void playSound(LPCWSTR sound);
 
+	void ProposeAutoFinish();
+	void AutoFinish();
+	bool autoFinishRunning = false;
+	float autoFinishTime = 0.0f;
+	const float autoFinishStep = 0.5f;
+	CardObject lastBaseCards[4]; // cache last card from each base
+
 	void SavePreviousState();
 	bool LoadPreviousState(bool* isLast);
-	void SetUndoAvailability(bool flag);
+	void SetOptionAvailability(UINT option, bool flag);
+	void SetMenuItemText(HMENU hMenu, UINT itemId, const wchar_t* newText);
 
 	LPCWSTR cardPlaceSound;
 	LPCWSTR cardSwitchSound;
@@ -165,4 +178,24 @@ private:
 
 	bool SaveExists();
 	void onCardMoved();
+
+	float previousTime;
+	float deltaTime;
+	void UpdateDeltaTime();
+
+	std::wstring ShowSaveDialog(HWND);
+	std::wstring ShowOpenDialog(HWND);
+	std::string WideToString(LPCWSTR wide);
+
+	bool selectedSaveFile = false;
+	std::string saveFilePath;
+
+	bool SaveLastSavePath(const std::wstring& path);
+	std::wstring LoadLastSavePath();
+
+	float autoSaveCountDown = 60.0f; // every 1 minute
+
+	void initCardsWithSeed();
+
+	unsigned int currentSeed;
 };

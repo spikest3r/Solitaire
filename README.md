@@ -31,6 +31,10 @@ This game loads resources from DLL.
 
 * Game timer (with pause/resume feature)
 
+* Auto-finish
+
+* Custom seed support
+
 ## Dependencies
 
 * GLFW3 and GLFW3 Native
