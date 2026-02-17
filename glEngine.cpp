@@ -1,4 +1,4 @@
-#define STB_IMAGE_IMPLEMENTATION
+﻿#define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 #include "glEngine.h"
 #include <glm/ext/matrix_clip_space.hpp>
@@ -8,9 +8,11 @@
 #include <stdio.h>
 #include <thread>
 #include <commdlg.h>
+#include <filesystem>
 
 #define UNDO 3001
 #define NEW_GAME 1001
+#define RESTART_GAME 3010
 #define LOAD_GAME 2001
 #define SAVE_GAME 2002
 #define TOGGLE_BG 3005
@@ -286,6 +288,7 @@ bool Engine::createFramebuffer() {
 Engine::Engine(const char* name, int w, int h, bool* success) {
     windowWidth = w;
     windowHeight = h;
+    ogTitle = name;
 
     resources = new Resource("solitaire.dll", success);
     if (!*success) return;
@@ -402,6 +405,15 @@ void Engine::UpdateDeltaTime() {
 void Engine::loop() {
     UpdateDeltaTime();
 
+    for (int i = 0; i < 7; i++) {
+        for (int j = columns[i].size() - 1; j >= 0; j--) {
+            if (j == columns[i].size() - 1 && !columns[i][j].revealed && (updateColumns || autoFinishRunning) && (!mousePressed || autoFinishRunning)) {
+                columns[i][j].revealed = true;
+                updateColumns = false;
+            }
+        }
+    }
+
     if (selectedSaveFile && (!winning && !autoFinishRunning && !pauseGame && !pauseTimer)) {
         autoSaveCountDown -= deltaTime;
         if (autoSaveCountDown <= 0.0f) {
@@ -433,6 +445,8 @@ void Engine::loop() {
                     int i = 0;
                     for (auto& lastCard : lastBaseCards) {
                         if (legalAutoFinishMove(pile.back(), lastCard)) {
+                            SavePreviousState();
+
                             bases[i].push_back(pile.back());
                             pile.pop_back();
                             lastCard = bases[i].back();
@@ -440,6 +454,9 @@ void Engine::loop() {
                             UpdateMovesStatusText();
                             shouldBreak = true;
                             break;
+                        }
+                        else {
+                            int a = 0;
                         }
                         i++;
                     }
@@ -559,10 +576,6 @@ void Engine::update() {
         }
 
         for (int j = columns[i].size() - 1; j >= 0; j--) {
-            if (j == columns[i].size() - 1 && !columns[i][j].revealed && updateColumns && !mousePressed) { 
-                columns[i][j].revealed = true;
-                updateColumns = false;
-            }
             glm::vec3 cardPositionww = glm::vec3(cardNdcX + (i * 0.25f), cardNdcY - (j * verticalSpacing) + (cardVertices[5] - cardVertices[1]) / 6.5f, 0.0f);
             if (mousePressed) {
                 if (hoverCard(ndcX, ndcY, cardPositionww) && columns[i][j].revealed && (columns[i].size() - j == 1 || draggingStack.empty())) {
@@ -716,11 +729,14 @@ void Engine::update() {
 
     if (mousePressed && !draggingStack.empty() && validHover) {
         SetCursor(currentMoveIsLegal ? legal : illegal);
+        if (currentMoveIsLegal) PushDefaultStatusMessage(L"Release LMB to drop card");
+        else PushDefaultStatusMessage(L"Illegal move");
         isCursorArrow = false;
     }
     else if(!isCursorArrow) {
         isCursorArrow = true; // avoid hammering api to always set same cursor
         SetCursor(arrow);
+        ClearDefaultStatusMessage();
     }
 
     if (!mousePressed) hoverOverBase = false;
@@ -911,6 +927,14 @@ void Engine::ProposeAutoFinish() {
 }
 
 void Engine::AutoFinish() {
+    if (autoFinishRunning) {
+        PushStatusMessage(L"Auto-finish canceled");
+        autoFinishRunning = false;
+        pauseGame = false;
+        pauseTimer = false;
+        return;
+    }
+
     pauseGame = true;
     pauseTimer = true;
 
@@ -920,7 +944,10 @@ void Engine::AutoFinish() {
         else lastBaseCards[i] = bases[i].back();
     }
 
+    statusMessageTime = -1;
     statusMessageDirty = true; // flush text
+
+    SetMenuItemText(gamePopup, AUTO_FINISH, L"Stop auto-finish");
 }
 
 bool Engine::legalMove(const CardObject& topCard, const CardObject& secondCard) {
@@ -929,7 +956,7 @@ bool Engine::legalMove(const CardObject& topCard, const CardObject& secondCard) 
     int secondRank = secondCard.rank == 12 ? 0 : secondCard.rank + 1;
     bool isAlternateColor = ((topCard.suit == 0 || topCard.suit == 1) && (secondCard.suit == 2 || secondCard.suit == 3)) ||
         ((topCard.suit == 2 || topCard.suit == 3) && (secondCard.suit == 1 || secondCard.suit == 0));
-    bool isDescendingRank = (topRank - secondRank == 1);
+    bool isDescendingRank = (topRank - secondRank == 1) && (topRank != 1 && secondRank != 0);
 
     return isAlternateColor && isDescendingRank;
 }
@@ -1029,6 +1056,8 @@ void Engine::initCards(int userSeed) {
 
     pauseGame = false;
     selectedSaveFile = false;
+
+    SetWindowTitle("");
 }
 
 void Engine::killHotkeys() {
@@ -1188,7 +1217,7 @@ void Engine::createStatusBar() {
     SendMessage(hStatus, SB_SETTEXT, 0, (LPARAM)TEXT("Ready"));
     SendMessage(hStatus, SB_SETTEXT, 1, (LPARAM)TEXT("Time: 0"));
     SendMessage(hStatus, SB_SETTEXT, 2, (LPARAM)TEXT("Moves: 0"));
-    SendMessage(hStatus, SB_SETTEXT, 4, (LPARAM)TEXT("v3.2")); // <3
+    SendMessage(hStatus, SB_SETTEXT, 4, (LPARAM)TEXT("v3.2.1")); // <3
 }
 
 void Engine::initWinapi() {
@@ -1208,6 +1237,7 @@ void Engine::initWinapi() {
     AppendMenu(gamePopup, MF_STRING, AUTO_FINISH, TEXT("Auto-finish\tALT+F"));
     AppendMenu(gamePopup, MF_SEPARATOR, 0, 0);
     AppendMenu(gamePopup, MF_STRING, NEW_GAME, TEXT("New Game\tCTRL+N"));
+    AppendMenu(gamePopup, MF_STRING, RESTART_GAME, TEXT("Restart Game"));
     HMENU seedPopup = CreatePopupMenu();
     AppendMenu(seedPopup, MF_STRING, GET_SEED, TEXT("Get current seed"));
     AppendMenu(seedPopup, MF_STRING, SET_SEED, TEXT("New game with custom seed"));
@@ -1239,7 +1269,7 @@ void Engine::initWinapi() {
     createStatusBar();
 }
 
-std::wstring Engine::ShowOpenDialog(HWND hwnd)
+std::wstring Engine::ShowOpenDialog(HWND hwnd, bool allFiles)
 {
     WCHAR fileName[MAX_PATH] = L"";
 
@@ -1248,7 +1278,7 @@ std::wstring Engine::ShowOpenDialog(HWND hwnd)
     ofn.hwndOwner = hwnd;       // parent window
     ofn.lpstrFile = fileName;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrFilter = L"All Files\0*.*\0Text Files\0*.txt\0";
+    ofn.lpstrFilter = allFiles ? L"All Files\0*.*\0" : L"Save File\0*.sav\0";
     ofn.nFilterIndex = 1;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
 
@@ -1269,20 +1299,27 @@ std::wstring Engine::ShowSaveDialog(HWND hwnd)
     ofn.hwndOwner = hwnd;
     ofn.lpstrFile = fileName;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrFilter = L"Text Files\0*.txt\0All Files\0*.*\0";
+    ofn.lpstrFilter = L"Save File (*.sav)\0*.sav\0\0";
+    ofn.lpstrDefExt = L"sav";
     ofn.nFilterIndex = 1;
     ofn.Flags = OFN_OVERWRITEPROMPT;
 
     if (GetSaveFileName(&ofn))
     {
-        return std::wstring(fileName);
+        std::wstring path = fileName;
+        std::filesystem::path p(path);
+
+        if (p.extension() != L".sav")
+            p.replace_extension(L".sav");
+
+        return p.wstring();
     }
 
     return L"";
 }
 
 bool Engine::SaveGame() {
-    if (winning) {
+    if (winning || autoFinishRunning) {
         PushStatusMessage(L"Unable to save!");
         return false;
     }
@@ -1300,6 +1337,8 @@ bool Engine::SaveGame() {
     }
     Save(saveFilePath,cards, columns, bases, deck, revealedDeck, previousMoves, time, moves, currentSeed);
     PushStatusMessage(L"Game saved successfully!");
+    auto fn = std::filesystem::path(saveFilePath).filename();
+    SetWindowTitle(fn.string().c_str());
     return true;
 }
 
@@ -1324,12 +1363,15 @@ bool Engine::LoadGame(std::wstring presetPath) {
         ShowUserMessage("Failed to load saved game! File might be corrupted or incompatible", "Bad file",MB_OK|MB_ICONERROR);
         return false;
     }
+    autoFinishRunning = false;
     userSavedGame = true;
+    auto fn = std::filesystem::path(saveFilePath).filename().string();
+    SetWindowTitle(fn.c_str());
     bool isLast = previousMoves.empty();
     SetOptionAvailability(UNDO, !isLast);
     ResetGameTimer(newTime);
     UpdateMovesStatusText();
-    if(!autoFinishRunning) PushStatusMessage(L"Loaded game");
+    PushStatusMessage(L"Loaded game");
     return true;
 }
 
@@ -1375,6 +1417,23 @@ void Engine::handleMenu(int id) {
         }
         break;
     }
+    case RESTART_GAME: {
+        auto message = ShowUserMessage("Would you like to save this game before restarting?", "Restart game", MB_YESNOCANCEL | MB_ICONQUESTION);
+        switch (message) {
+        case IDYES:
+            if (!(userSavedGame = SaveGame())) break;
+            // fall through
+        case IDNO:
+            initCards(currentSeed);
+            KillGameTimer();
+            ResetGameTimer(0);
+            pauseGame = false;
+            break;
+        case IDCANCEL:
+            break;
+        }
+        break;
+    }
     case 1002:
     case 1003:
     case 1004: {
@@ -1384,12 +1443,16 @@ void Engine::handleMenu(int id) {
         break;
     }
     case 2005: {
-        auto rawPath = ShowOpenDialog(hwnd);
+        auto rawPath = ShowOpenDialog(hwnd, true);
         if (rawPath.empty()) break;
+        PushStatusMessage(L"Loading image...");
         auto path = WideToString(rawPath.c_str());
         int w, h, c;
         unsigned char* imageData = stbi_load(path.c_str(), &w, &h, &c, 3);
-        if (!imageData) break;
+        if (!imageData) {
+            PushStatusMessage(L"Failed to load image!");
+            break;
+        }
         if (customBgTexture != -1) {
             glDeleteTextures(1, &customBgTexture);
             customBgTexture = -1;
@@ -1457,13 +1520,11 @@ void Engine::handleMenu(int id) {
     }
     case AUTO_FINISH:
     {
-        if (autoFinishRunning) return;
         if (!autoFinishAvail) {
             PushStatusMessage(L"Auto-finish unavailable!");
             return;
         }
         AutoFinish();
-        SetOptionAvailability(AUTO_FINISH, false);
         break;
     }
     case PAUSE: {
@@ -1530,6 +1591,17 @@ void Engine::SetMenuItemText(HMENU hMenu, UINT itemId, const wchar_t* newText)
     DrawMenuBar(hwnd);
 }
 
+void Engine::PushDefaultStatusMessage(LPCWSTR statusMessage) {
+    isCustomDefLabel = true;
+    customDefLabel = statusMessage;
+    statusMessageDirty = true;
+}
+
+void Engine::ClearDefaultStatusMessage() {
+    isCustomDefLabel = false;
+    statusMessageDirty = true;
+}
+
 void Engine::PushStatusMessage(LPCWSTR statusMessage) {
     SendMessage(hStatus, SB_SETTEXT, 0, (LPARAM)statusMessage);
     statusMessageDirty = true;
@@ -1552,6 +1624,9 @@ void Engine::StatusThreadFunc() {
         }
         else if (autoFinishRunning) {
             defaultLabel = L"Auto-finish in progress...";
+        }
+        else if (isCustomDefLabel) {
+            defaultLabel = customDefLabel;
         }
         else {
             defaultLabel = (pauseState ? L"Game is paused" : L"Ready");
@@ -1703,4 +1778,17 @@ void Engine::initCardsWithSeed() {
         }
     }
     pauseTimer = false;
+}
+
+void Engine::SetWindowTitle(const char* additionalText) {
+    const int len = strlen(additionalText);
+    if (len >= 2048) return;
+    if (len == 0) {
+        glfwSetWindowTitle(window, ogTitle);
+    }
+    else {
+        char buffer[4096];
+        sprintf_s(buffer, 4096, "%s - %s", ogTitle, additionalText);
+        glfwSetWindowTitle(window, buffer);
+    }
 }

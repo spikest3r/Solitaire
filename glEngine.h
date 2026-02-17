@@ -47,6 +47,8 @@ public:
 
 	int ShowUserMessage(const char* message, const char* caption, UINT type, bool ensureNoGamePause = false);
 private:
+	const char* ogTitle;
+
 	bool isCursorArrow = true;
 	bool isRunning = true;
 
@@ -131,6 +133,8 @@ private:
 	bool winning = false;
 	bool isWinningAnimationPlaying = false;
 	float winningAnimationTime = 0;
+	float popTimer = 0.0f;
+	const float popInterval = 1.7f;
 
 	float r = 0.0f;
 
@@ -184,7 +188,7 @@ private:
 	void UpdateDeltaTime();
 
 	std::wstring ShowSaveDialog(HWND);
-	std::wstring ShowOpenDialog(HWND);
+	std::wstring ShowOpenDialog(HWND, bool allFiles = false);
 	std::string WideToString(LPCWSTR wide);
 
 	bool selectedSaveFile = false;
@@ -198,4 +202,11 @@ private:
 	void initCardsWithSeed();
 
 	unsigned int currentSeed;
+
+	void PushDefaultStatusMessage(LPCWSTR statusMessage);
+	void ClearDefaultStatusMessage();
+	bool isCustomDefLabel = false;
+	LPCWSTR customDefLabel;
+
+	void SetWindowTitle(const char* additionalText);
 };
