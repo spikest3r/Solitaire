@@ -1,6 +1,41 @@
 #include <fstream>
 #include "cardobject.h"
 
+#include <fstream>
+#include <vector>
+#include <iostream>
+#include "cardobject.h"
+
+// Helper to save/load a single CardObject
+void saveCard(std::ofstream& out, const CardObject& c) {
+    out.write((char*)&c.rank, sizeof(c.rank));
+    out.write((char*)&c.suit, sizeof(c.suit));
+    out.write((char*)&c.revealed, sizeof(c.revealed));
+    // anim and scale are ignored
+}
+
+bool loadCard(std::ifstream& in, CardObject& c) {
+    // Mandatory fields in all formats
+    if (!in.read((char*)&c.rank, sizeof(c.rank))) return false;
+    if (!in.read((char*)&c.suit, sizeof(c.suit))) return false;
+    if (!in.read((char*)&c.revealed, sizeof(c.revealed))) return false;
+
+    // Skip any extra bytes from old files (draggingPos, scale, anim)
+    // Old CardObject size minus what we just read
+    size_t readSize = sizeof(c.rank) + sizeof(c.suit) + sizeof(c.revealed);
+    size_t totalSize = sizeof(CardObject); // might include anim, scale, draggingPos
+    if (totalSize > readSize && in.peek() != EOF) {
+        in.seekg(totalSize - readSize, std::ios::cur);
+    }
+
+    // Reset runtime-only fields
+    c.anim = nullptr;
+    c.scale = 1.0f;
+    c.draggingPos = glm::vec3(0.0f);
+    return true;
+}
+
+// Save function
 void Save(
     std::string path,
     const CardObject(&cards)[52],
@@ -14,81 +49,63 @@ void Save(
     unsigned int currentSeed
 ) {
     std::ofstream out(path, std::ios::binary);
-    if (!out) return;
-
-    // time
-    out.write((char*)&time, sizeof(int));
-
-    // moves
-    out.write((char*)&moves, sizeof(int));
-
-    // cards
-    out.write((char*)cards, sizeof(cards));
-
-    // columns
-    for (int i = 0; i < 7; i++) {
-        size_t sz = columns[i].size();
-        out.write((char*)&sz, sizeof(sz));
-        out.write((char*)columns[i].data(), sz * sizeof(CardObject));
-    }
-
-    // deck
-    size_t deckSz = deck.size();
-    out.write((char*)&deckSz, sizeof(deckSz));
-    out.write((char*)deck.data(), deckSz * sizeof(CardObject));
-
-    // revealedDeck
-    size_t revSz = revealedDeck.size();
-    out.write((char*)&revSz, sizeof(revSz));
-    out.write((char*)revealedDeck.data(), revSz * sizeof(CardObject));
-
-    // bases
-    for (int i = 0; i < 4; i++) {
-        size_t sz = bases[i].size();
-        out.write((char*)&sz, sizeof(sz));
-        out.write((char*)bases[i].data(), sz * sizeof(CardObject));
-    }
-
-    if (previousMoves.empty()) {
-        size_t pmSz = 0;
-        out.write((char*)&pmSz, sizeof(pmSz));
+    if (!out) {
+        std::cerr << "Failed to open file for saving: " << path << "\n";
         return;
     }
-    
-    // previousMoves
+
+    out.write((char*)&time, sizeof(time));
+    out.write((char*)&moves, sizeof(moves));
+
+    for (int i = 0; i < 52; ++i) saveCard(out, cards[i]);
+
+    for (int i = 0; i < 7; ++i) {
+        size_t sz = columns[i].size();
+        out.write((char*)&sz, sizeof(sz));
+        for (auto& c : columns[i]) saveCard(out, c);
+    }
+
+    size_t deckSz = deck.size();
+    out.write((char*)&deckSz, sizeof(deckSz));
+    for (auto& c : deck) saveCard(out, c);
+
+    size_t revSz = revealedDeck.size();
+    out.write((char*)&revSz, sizeof(revSz));
+    for (auto& c : revealedDeck) saveCard(out, c);
+
+    for (int i = 0; i < 4; ++i) {
+        size_t sz = bases[i].size();
+        out.write((char*)&sz, sizeof(sz));
+        for (auto& c : bases[i]) saveCard(out, c);
+    }
+
     size_t pmSz = previousMoves.size();
     out.write((char*)&pmSz, sizeof(pmSz));
 
     for (const GameState& gs : previousMoves) {
-
-        // columns
         for (int i = 0; i < 7; ++i) {
             size_t sz = gs.columns[i].size();
             out.write((char*)&sz, sizeof(sz));
-            out.write((char*)gs.columns[i].data(), sz * sizeof(CardObject));
+            for (auto& c : gs.columns[i]) saveCard(out, c);
         }
-
-        // bases
         for (int i = 0; i < 4; ++i) {
             size_t sz = gs.bases[i].size();
             out.write((char*)&sz, sizeof(sz));
-            out.write((char*)gs.bases[i].data(), sz * sizeof(CardObject));
+            for (auto& c : gs.bases[i]) saveCard(out, c);
         }
-
-        // deck
-        size_t deckSz = gs.deck.size();
-        out.write((char*)&deckSz, sizeof(deckSz));
-        out.write((char*)gs.deck.data(), deckSz * sizeof(CardObject));
-
-        // revealedDeck
-        size_t revSz = gs.revealedDeck.size();
-        out.write((char*)&revSz, sizeof(revSz));
-        out.write((char*)gs.revealedDeck.data(), revSz * sizeof(CardObject));
+        size_t dSz = gs.deck.size();
+        out.write((char*)&dSz, sizeof(dSz));
+        for (auto& c : gs.deck) saveCard(out, c);
+        size_t rSz = gs.revealedDeck.size();
+        out.write((char*)&rSz, sizeof(rSz));
+        for (auto& c : gs.revealedDeck) saveCard(out, c);
     }
 
-    out.write((char*)&currentSeed, sizeof(unsigned int));
+    // Seed goes last
+    out.write((char*)&currentSeed, sizeof(currentSeed));
 }
 
+// Load function
 void Load(
     std::string path,
     CardObject(&cards)[52],
@@ -102,88 +119,84 @@ void Load(
     unsigned int& currentSeed
 ) {
     std::ifstream in(path, std::ios::binary);
-    if (!in) return;
-
-    // time
-    in.read((char*)&time, sizeof(int));
-
-    // moves
-    in.read((char*)&moves, sizeof(int));
-
-    // cards
-    in.read((char*)cards, sizeof(cards));
-
-    // columns
-    for (int i = 0; i < 7; i++) {
-        size_t sz;
-        in.read((char*)&sz, sizeof(sz));
-        columns[i].resize(sz);
-        in.read((char*)columns[i].data(), sz * sizeof(CardObject));
+    if (!in) {
+        std::cerr << "Failed to open file for loading: " << path << "\n";
+        return;
     }
 
-    // deck
-    size_t deckSz;
-    in.read((char*)&deckSz, sizeof(deckSz));
-    deck.resize(deckSz);
-    in.read((char*)deck.data(), deckSz * sizeof(CardObject));
+    if (!in.read((char*)&time, sizeof(time))) return;
+    if (!in.read((char*)&moves, sizeof(moves))) return;
 
-    // revealedDeck
-    size_t revSz;
-    in.read((char*)&revSz, sizeof(revSz));
-    revealedDeck.resize(revSz);
-    in.read((char*)revealedDeck.data(), revSz * sizeof(CardObject));
+    for (int i = 0; i < 52; ++i)
+        if (!loadCard(in, cards[i])) return;
 
-    // bases
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 7; ++i) {
         size_t sz;
-        in.read((char*)&sz, sizeof(sz));
+        if (!in.read((char*)&sz, sizeof(sz))) return;
+        columns[i].resize(sz);
+        for (auto& c : columns[i])
+            if (!loadCard(in, c)) return;
+    }
+
+    size_t deckSz;
+    if (!in.read((char*)&deckSz, sizeof(deckSz))) return;
+    deck.resize(deckSz);
+    for (auto& c : deck)
+        if (!loadCard(in, c)) return;
+
+    size_t revSz;
+    if (!in.read((char*)&revSz, sizeof(revSz))) return;
+    revealedDeck.resize(revSz);
+    for (auto& c : revealedDeck)
+        if (!loadCard(in, c)) return;
+
+    for (int i = 0; i < 4; ++i) {
+        size_t sz;
+        if (!in.read((char*)&sz, sizeof(sz))) return;
         bases[i].resize(sz);
-        in.read((char*)bases[i].data(), sz * sizeof(CardObject));
+        for (auto& c : bases[i])
+            if (!loadCard(in, c)) return;
     }
 
     size_t pmSz;
-    in.read((char*)&pmSz, sizeof(pmSz));
+    if (!in.read((char*)&pmSz, sizeof(pmSz))) pmSz = 0;
     previousMoves.clear();
     previousMoves.resize(pmSz);
 
     for (size_t p = 0; p < pmSz; ++p) {
         GameState& gs = previousMoves[p];
-
-        // columns
         for (int i = 0; i < 7; ++i) {
             size_t sz;
-            in.read((char*)&sz, sizeof(sz));
+            if (!in.read((char*)&sz, sizeof(sz))) return;
             gs.columns[i].resize(sz);
-            in.read((char*)gs.columns[i].data(), sz * sizeof(CardObject));
+            for (auto& c : gs.columns[i])
+                if (!loadCard(in, c)) return;
         }
-
-        // bases
         for (int i = 0; i < 4; ++i) {
             size_t sz;
-            in.read((char*)&sz, sizeof(sz));
+            if (!in.read((char*)&sz, sizeof(sz))) return;
             gs.bases[i].resize(sz);
-            in.read((char*)gs.bases[i].data(), sz * sizeof(CardObject));
+            for (auto& c : gs.bases[i])
+                if (!loadCard(in, c)) return;
         }
+        size_t dSz;
+        if (!in.read((char*)&dSz, sizeof(dSz))) return;
+        gs.deck.resize(dSz);
+        for (auto& c : gs.deck)
+            if (!loadCard(in, c)) return;
 
-        // deck
-        size_t deckSz;
-        in.read((char*)&deckSz, sizeof(deckSz));
-        gs.deck.resize(deckSz);
-        in.read((char*)gs.deck.data(), deckSz * sizeof(CardObject));
-
-        // revealedDeck
-        size_t revSz;
-        in.read((char*)&revSz, sizeof(revSz));
-        gs.revealedDeck.resize(revSz);
-        in.read((char*)gs.revealedDeck.data(), revSz * sizeof(CardObject));
+        size_t rSz;
+        if (!in.read((char*)&rSz, sizeof(rSz))) return;
+        gs.revealedDeck.resize(rSz);
+        for (auto& c : gs.revealedDeck)
+            if (!loadCard(in, c)) return;
     }
 
+    // Seed: compatibility mode
     if (in.peek() != EOF) {
-        in.read((char*)&currentSeed, sizeof(unsigned int));
+        in.read((char*)&currentSeed, sizeof(currentSeed));
     }
     else {
-        // Compatibility mode: old file detected
-        // You can set it to 0 or generate a new one
         currentSeed = 0;
     }
 }

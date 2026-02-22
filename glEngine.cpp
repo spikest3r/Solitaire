@@ -20,6 +20,7 @@
 #define AUTO_FINISH 3007
 #define GET_SEED 3008
 #define SET_SEED 3009
+#define STATISTICS 4010
 
 #define WM_UPDATE_TIMER (WM_USER+1)
 
@@ -28,8 +29,7 @@
 // Such featurures might be unstable or very buggy
 // #define EXPERIMENTAL
 
-const char* vertexShader = R"(
-#version 330 core
+const char* vertexShader = R"(#version 430 core
 layout(location = 0) in vec2 aPos;
 uniform mat4 uMVP;
 uniform vec4 uUVRect;
@@ -48,9 +48,23 @@ const char* fragmentShader = R"(
 out vec4 FragColor;
 in vec2 TexCoord;
 uniform sampler2D uTexture;
+uniform int legal;
 void main()
 {
-    FragColor = texture(uTexture,TexCoord);
+    vec4 texColor = texture(uTexture, TexCoord);
+    
+    if (legal == 1) {
+        // Define the yellow tint (R:1.0, G:1.0, B:0.0)
+        vec3 yellowTint = vec3(1.0, 1.0, 0.0);
+        
+        // Blend the texture color with yellow. 
+        // 0.3 means 30% yellow, 70% original texture.
+        vec3 tintedColor = mix(texColor.rgb, yellowTint, 0.3);
+        
+        FragColor = vec4(tintedColor, texColor.a);
+    } else {
+        FragColor = texColor;
+    }
 }
 )";
 
@@ -74,7 +88,7 @@ float quadVertices[] = {
      1.0f,  1.0f, 1.0f, 1.0f   // top-right
 };
 
-const char* quadVertex = R"(#version 330 core
+const char* quadVertex = R"(#version 430 core
 
 layout(location = 0) in vec2 aPos;
 layout(location = 1) in vec2 aTexCoord;
@@ -88,7 +102,7 @@ void main()
 }
 )";
 
-const char* quadFragment = R"(#version 330 core
+const char* quadFragment = R"(#version 430 core
 
 out vec4 FragColor;
 in vec2 TexCoord;
@@ -100,6 +114,11 @@ void main()
     FragColor = texture(uTexture, TexCoord);
 }
 )";
+
+template<typename T>
+T lerp(const T& start, const T& end, float t) {
+    return start + (end - start) * t;
+}
 
 bool Engine::loadAtlas() {
     DWORD atlasSize;
@@ -296,7 +315,7 @@ Engine::Engine(const char* name, int w, int h, bool* success) {
     stbi_set_flip_vertically_on_load(true);
 
     glfwInit();
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
@@ -357,13 +376,14 @@ Engine::Engine(const char* name, int w, int h, bool* success) {
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(false);
+    glDepthMask(true);
+    glDisable(GL_CULL_FACE);
 
     texLoc = glGetUniformLocation(textureShader.ID, "uTexture");
     quadSizeLoc = glGetUniformLocation(textureShader.ID, "quadSize");
     uvLoc = glGetUniformLocation(textureShader.ID, "uUVRect");
 
-    initCards();
+    initCards(0, true); // dont count loss on first init
 
     verticalSpacing = (cardVertices[5] - cardVertices[1]) * 0.12;
 
@@ -409,6 +429,9 @@ void Engine::loop() {
         for (int j = columns[i].size() - 1; j >= 0; j--) {
             if (j == columns[i].size() - 1 && !columns[i][j].revealed && (updateColumns || autoFinishRunning) && (!mousePressed || autoFinishRunning)) {
                 columns[i][j].revealed = true;
+                CardAnimation* anim = new CardAnimation{};
+                anim->reveal = true;
+                columns[i][j].anim = anim;
                 updateColumns = false;
             }
         }
@@ -436,6 +459,7 @@ void Engine::loop() {
                 // execute auto finish logic
                 int empties = 0;
                 bool shouldBreak = false;
+                int noMovesMade = 0;
                 for (auto& pile : columns) {
                     if (pile.size() == 0) {
                         empties++;
@@ -456,7 +480,7 @@ void Engine::loop() {
                             break;
                         }
                         else {
-                            int a = 0;
+                            noMovesMade++;
                         }
                         i++;
                     }
@@ -469,6 +493,10 @@ void Engine::loop() {
                     
                     // win!
                     winning = true;
+                }
+                if (noMovesMade >= 4 * 7) {
+                    ShowUserMessage("Auto-finish didn't find anymore moves!", "Error", MB_OK | MB_ICONERROR);
+                    autoFinishRunning = false;
                 }
             }
         } 
@@ -483,7 +511,7 @@ void Engine::loop() {
     
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
     glViewport(0, 0, windowWidth, windowHeight);
-
+    UpdateAnimations();
     render(isWinningAnimationPlaying);
     if (isWinningAnimationPlaying) {
         winningAnimationTime += 0.01f;
@@ -508,12 +536,54 @@ void Engine::loop() {
         char message[256];
         sprintf_s(message, "You won!\nTime: %i\nMoves: %i", time, moves);
         ShowUserMessage(message, "Congratulations!", MB_OK | MB_ICONINFORMATION);
-        initCards();
+        int won, lost;
+        if (LoadStatistics(won, lost))
+            SaveStatistics(won + 1, lost);
+        else
+            SaveStatistics(1, 0);
+        initCards(0, true);
         ResetGameTimer(0);
     }
 
     glfwSwapBuffers(window);
     glfwPollEvents();
+}
+
+void Engine::UpdateAnimations() {
+    // Handle Deck -> Revealed Deck
+    if (!deck.empty() && deck.back().anim) {
+        CardAnimation* a = deck.back().anim;
+        a->timeStep += deltaTime * 3.0f; // Speed up animation
+
+        if (a->timeStep >= 1.0f) {
+            deck.back().revealed = true;
+            delete deck.back().anim;
+            deck.back().anim = nullptr;
+
+            revealedDeck.push_back(deck.back());
+            deck.pop_back();
+            playSound(cardSwitchSound);
+            onCardMoved();
+        }
+    }
+
+    // Handle Revealed Deck -> Empty Deck (Reset)
+    if (!revealedDeck.empty() && revealedDeck.back().anim && revealedDeck.back().anim->hide) {
+        CardAnimation* a = revealedDeck.back().anim;
+        a->timeStep += deltaTime * 3.0f;
+
+        if (a->timeStep >= 1.0f) {
+            delete revealedDeck.back().anim;
+            revealedDeck.back().anim = nullptr;
+
+            // Move all cards back
+            for (auto it = revealedDeck.rbegin(); it != revealedDeck.rend(); ++it) {
+                it->revealed = false;
+                deck.push_back(*it);
+            }
+            revealedDeck.clear();
+        }
+    }
 }
 
 void Engine::update() {
@@ -529,20 +599,51 @@ void Engine::update() {
     if (mousePressed) {
         if (!deckMouseHold) {
             deckMouseHold = true;
+
+            CardObject* topDeck = !deck.empty() ? &deck.back() : nullptr;
+            CardObject* topRevealed = !revealedDeck.empty() ? &revealedDeck.back() : nullptr;
+
+            if ((topDeck && topDeck->anim) || (topRevealed && topRevealed->anim)) {
+                return;
+            }
+
             if (hoverCard(ndcX, ndcY, glm::vec3(cardNdcX, cardNdcY + 0.55f, 0.0f))) {
                 dontSaveMore = false; // this line fixes deck state bug
                 SavePreviousState();
                 if (!deck.empty()) {
-                    revealedDeck.push_back(deck.back());
-                    deck.pop_back();
-                    playSound(cardSwitchSound);
-                    onCardMoved(); // from deck to revealed deck
+                    auto cardObj = &deck.back();
+                    if (cardObj->anim) {
+                        delete cardObj->anim;
+                        cardObj->revealed = true;
+                        revealedDeck.push_back(*cardObj);
+                        deck.pop_back();
+                        playSound(cardSwitchSound);
+                        onCardMoved(); // from deck to revealed deck
+                    }
+                    if (!deck.empty()) {
+                        CardAnimation* anim = new CardAnimation{};
+                        anim->timeStep = 0.0f;
+                        anim->reveal = true;
+                        anim->move = true;
+                        anim->xFrom = cardNdcX;
+                        anim->yFrom = cardNdcY + 0.5f;
+                        anim->xTo = revealedDeckPosition.x;
+                        anim->yTo = revealedDeckPosition.y;
+                        deck.back().anim = anim;
+                    }
                 }
                 else {
-                    deck.reserve(revealedDeck.size());
-                    for (auto it = revealedDeck.rbegin(); it != revealedDeck.rend(); ++it)
-                        deck.push_back(*it);
-                    revealedDeck.clear();
+                    if (!revealedDeck.back().anim) {
+                        CardAnimation* anim = new CardAnimation{};
+                        anim->timeStep = 0.0f;
+                        anim->move = true;
+                        anim->xTo = cardNdcX;
+                        anim->yTo = cardNdcY + 0.5f;
+                        anim->xFrom = revealedDeckPosition.x;
+                        anim->yFrom = revealedDeckPosition.y;
+                        anim->hide = true;
+                        revealedDeck.back().anim = anim;
+                    }
                 }
                 dragActive = true;
             }
@@ -580,6 +681,10 @@ void Engine::update() {
             if (mousePressed) {
                 if (hoverCard(ndcX, ndcY, cardPositionww) && columns[i][j].revealed && (columns[i].size() - j == 1 || draggingStack.empty())) {
                     if (draggingStack.empty()) {
+                        if (columns[i][j].anim) {
+                            delete columns[i][j].anim;
+                            columns[i][j].anim = nullptr;
+                        }
                         SavePreviousState();
                         dontSaveMore = true;
 
@@ -688,6 +793,7 @@ void Engine::update() {
                 bool isLast;
                 LoadPreviousState(&isLast);
                 SetOptionAvailability(UNDO, !isLast);
+
                 /*for (auto& card : draggingStack) {
                     columns[homeColumn].push_back(card);
                 }*/
@@ -756,6 +862,7 @@ void Engine::render(bool playAnim) {
         glUniform4f(uvLoc, 0.0f, 0.0f, 1.0f, 1.0f);
         glUniform2f(quadSizeLoc, 1.0f, 1.0f);
         glUniform1i(texLoc, 0);
+        textureShader.passUniformInt("legal", 0);
         textureShader.passUniformMat4("uMVP", glm::scale(glm::mat4(1.0f), glm::vec3(2.0f, 2.0f, 1.0f)));
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     }
@@ -790,18 +897,82 @@ void Engine::render(bool playAnim) {
         return;
     }
 
-    // render field
-    CardObject deckFace;
-    deckFace.revealed = deck.empty();
-    deckFace.suit = 4;
-    deckFace.rank = deck.empty() ? 2 : 0;
-    renderCard(deckFace, glm::vec3(cardNdcX, cardNdcY + 0.5f, 0.0f));
-
     if (!revealedDeck.empty()) {
-        if (revealedDeck.size() >= 2) {
+        CardObject* card = &revealedDeck.back();
+        float angle = 0.0f;
+        glm::vec3 cardPos = revealedDeckPosition;
+        if (card->anim) {
+            if (card->anim->hide) {
+                card->anim->timeStep += deltaTime * 2.0f;
+
+                if (card->anim->timeStep >= 1.0f) {
+                    goto r1;
+                }
+                else {
+                    if (card->anim->timeStep < 0.5f) {
+                        angle = -90.0f * (card->anim->timeStep * 2.0f);
+                        card->revealed = true;
+                    }
+                    else {
+                        angle = 90.0f * ((1.0f - card->anim->timeStep) * 2.0f);
+                        card->revealed = false;
+                    }
+                }
+            }
+            if (card->anim->move) {
+                float x = lerp(card->anim->xFrom, card->anim->xTo, card->anim->timeStep);
+                float y = lerp(card->anim->yFrom, card->anim->yTo, card->anim->timeStep);
+                cardPos = glm::vec3(x, y, 1.f);
+            }
+        }
+        if (revealedDeck.size() >= 2 && (!card->anim || (card->anim && !card->anim->hide))) {
             renderCard(revealedDeck[revealedDeck.size() - 2], revealedDeckPosition);
         }
-        if (!draggingDeckCard) renderCard(revealedDeck.back(), revealedDeckPosition);
+        if (!draggingDeckCard) renderCard(*card, cardPos, angle);
+    }
+
+    // render field
+    if (deck.size() > 0 && deck.back().anim) {
+        CardObject* card = &deck.back();
+        CardObject deckFace;
+        deckFace.revealed = deck.size() == 1;
+        deckFace.suit = 4;
+        deckFace.rank = deck.size() == 1 ? 2 : 0;
+        renderCard(deckFace, glm::vec3(cardNdcX, cardNdcY + 0.5f, 0.0f));
+
+        card->anim->timeStep += deltaTime * 2.0f;
+        float angle = 0.0f;
+
+        if (card->anim->reveal) {
+            card->anim->timeStep += deltaTime * 2.0f;
+
+            if (card->anim->timeStep >= 1.0f) {
+                goto r1;
+            }
+            else {
+                if (card->anim->timeStep < 0.5f) {
+                    angle = 180.0f * card->anim->timeStep;
+                    card->revealed = false; // Show back
+                }
+                else {
+                    angle = -90.0f + 180.0f * (card->anim->timeStep - 0.5f);
+                    card->revealed = true; // Show front
+                }
+            }
+        }
+
+        float x = lerp(card->anim->xFrom, card->anim->xTo, card->anim->timeStep);
+        float y = lerp(card->anim->yFrom, card->anim->yTo, card->anim->timeStep);
+        glm::vec3 movingPos = glm::vec3(x, y, 1.f);
+        renderCard(*card, movingPos, angle);
+    }
+    else {
+        r1:
+        CardObject deckFace;
+        deckFace.revealed = deck.empty();
+        deckFace.suit = 4;
+        deckFace.rank = deck.empty() ? 2 : 0;
+        renderCard(deckFace, glm::vec3(cardNdcX, cardNdcY + 0.5f, 0.0f));
     }
 
     for (int i = 0; i < 7; i++) {
@@ -817,8 +988,32 @@ void Engine::render(bool playAnim) {
     for (auto& pile : columns) {
         int b = 0;
         for (auto& card : pile) {
+            float angle = 0.0f;
+            CardObject card2 = card;
             glm::vec3 cardPos = glm::vec3(cardNdcX + (a * 0.25f), cardNdcY - (b * verticalSpacing), 0.0f);
-            renderCard(card, cardPos);
+
+            if (card.scale > 1.0f) card.scale -= deltaTime * 2.0f;
+            else card.scale = 1.0f;
+
+            if (card.anim) {
+                if(card.anim->reveal) {
+                    card.anim->timeStep += deltaTime * 2.0f;
+
+                    if (card.anim->timeStep >= 1.0f) {
+                    }
+                    else {
+                        if (card.anim->timeStep < 0.5f) {
+                            angle = 180.0f * card.anim->timeStep;
+                            card2.revealed = false; // Show back
+                        }
+                        else {
+                            angle = -90.0f + 180.0f * (card.anim->timeStep - 0.5f);
+                            card2.revealed = true; // Show front
+                        }
+                    }
+                }
+            }
+            renderCard(card2, cardPos, angle);
             b++;
         }
         a++;
@@ -833,6 +1028,12 @@ void Engine::render(bool playAnim) {
         obj.rank = empty ? 2 : base.back().rank;
         obj.suit = empty ? 4 : base.back().suit;
         obj.revealed = true;
+        if (base.size() > 0) {
+            CardObject* c = &base.back();
+            if (c->scale > 1.0f) c->scale -= deltaTime * 2.0f;
+            else c->scale = 1.0f;
+            obj.scale = c->scale;
+        }
         renderCard(obj, pos);
 
         x++;
@@ -842,7 +1043,9 @@ void Engine::render(bool playAnim) {
         int cardIndex = 0;
         for (auto& card : draggingStack) {
             card.draggingPos = glm::vec3(ndcX, ndcY - (cardIndex * 0.1f), 0.0f);
-            renderCard(card, card.draggingPos);
+            if (card.scale < 1.2f)
+                card.scale += deltaTime * 2.0f;
+            renderCard(card, card.draggingPos, 0.0f, currentMoveIsLegal);
             cardIndex++;
         }
     }
@@ -851,7 +1054,9 @@ void Engine::render(bool playAnim) {
         int cardIndex = 0;
         for (auto& card : draggingStack) {
             card.draggingPos = glm::vec3(ndcX, ndcY - (cardIndex * 0.1f), 0.0f);
-            renderCard(card, card.draggingPos);
+            if (card.scale < 1.2f)
+                card.scale += deltaTime * 2.0f;
+            renderCard(card, card.draggingPos, 0.0f, currentMoveIsLegal);
             cardIndex++;
         }
     }
@@ -891,8 +1096,12 @@ bool Engine::LoadPreviousState(bool* isLast) {
         *isLast = true; 
     }
 
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 4; ++i) {
         bases[i] = previousMove.bases[i];
+        for (auto& card : bases[i]) {
+            card.scale = 1.0f;
+        }
+    }
 
     //for (int i = 0; i < 52; ++i)
     //    cards[i] = previousMove.cards[i];
@@ -905,6 +1114,19 @@ bool Engine::LoadPreviousState(bool* isLast) {
 
     updateColumns = true;
     return true;
+}
+
+GameState* Engine::PeekPreviousState(bool* isLast) {
+    if (previousMoves.empty() && isLast) {
+        *isLast = true;
+        return nullptr;
+    }
+
+    if (previousMoves.size() == 1 && isLast) {
+        *isLast = true;
+    }
+
+    return &previousMoves.back();
 }
 
 void Engine::onCardMoved() {
@@ -973,7 +1195,7 @@ bool Engine::legalAutoFinishMove(const CardObject& topCard, const CardObject& se
     return (sameSuit && inOrder);
 }
 
-void Engine::renderCard(CardObject object, glm::vec3 position) {
+void Engine::renderCard(CardObject object, glm::vec3 position, float yRot, bool legal) {
     CardUV card = getCardUV(object.revealed ? object.rank : 0, object.revealed ? object.suit : 4);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, atlasTexture);
@@ -981,13 +1203,16 @@ void Engine::renderCard(CardObject object, glm::vec3 position) {
     glUniform4f(uvLoc, card.u0, card.v0, card.u1, card.v1);
     glUniform2f(quadSizeLoc, cardVertices[2] - cardVertices[0], cardVertices[5] - cardVertices[1]);
     glUniform1i(texLoc, 1);
-    glm::mat4 model = glm::translate(glm::mat4(1.0f), position);
+    textureShader.passUniformInt("legal", (int)legal);
+    glm::mat4 model = glm::translate(glm::mat4(1.0f), position) *
+        glm::rotate(glm::mat4(1.0f), glm::radians(yRot), glm::vec3(0.0f, 1.0f, 0.0f)) *
+        glm::scale(glm::mat4(1.0f), glm::vec3(object.scale, object.scale, 1.0f));   
     textureShader.passUniformMat4("uMVP", model);
     glBindVertexArray(cardQuad.VAO);
     glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 }
 
-void Engine::initCards(int userSeed) {
+void Engine::initCards(int userSeed, bool won) {
     ZeroMemory(cards, sizeof(cards));
     for (int i = 0; i < 7; i++) {
         columns[i].clear();
@@ -1018,6 +1243,7 @@ void Engine::initCards(int userSeed) {
         for (int rank = 0; rank < 13; rank++) {
             cards[cardIndex].suit = suit;
             cards[cardIndex].rank = rank;
+            cards[cardIndex].scale = 1.0f;
             cardIndex++;
         }
     }
@@ -1058,6 +1284,16 @@ void Engine::initCards(int userSeed) {
     selectedSaveFile = false;
 
     SetWindowTitle("");
+
+    undidMovesCount = 0;
+
+    if (!won) {
+        int won, lost;
+        if (LoadStatistics(won, lost))
+            SaveStatistics(won, lost + 1);
+        else
+            SaveStatistics(0, 1);
+    }
 }
 
 void Engine::killHotkeys() {
@@ -1068,6 +1304,7 @@ void Engine::killHotkeys() {
     UnregisterHotKey(hwnd, LOAD_GAME);
     UnregisterHotKey(hwnd, UNDO);
     UnregisterHotKey(hwnd, PAUSE);
+    UnregisterHotKey(hwnd, STATISTICS);
 }
 
 void Engine::terminate() {
@@ -1156,7 +1393,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT
         auto message = self->GetUserSavedGameFlag() ? IDNO : self->ShowUserMessage("Would you like to save the game before exiting?", "Exiting game", MB_ICONQUESTION | MB_YESNOCANCEL);
         switch (message) {
         case IDYES: {
-            bool saveSuccess = self->SaveGame();
+            bool saveSuccess = self->SaveGame(false);
             self->SetUserSavedGameFlag(saveSuccess);
             if (!saveSuccess) return 0; // early exit since save isn't successfull
             // fall through
@@ -1180,6 +1417,7 @@ void Engine::registerHotkeys() {
     RegisterHotKey(hwnd, NEW_GAME, MOD_CONTROL, 'N');
     RegisterHotKey(hwnd, UNDO, MOD_CONTROL, 'Z');
     RegisterHotKey(hwnd, PAUSE, MOD_CONTROL, 'P');
+    RegisterHotKey(hwnd, STATISTICS, MOD_CONTROL | MOD_ALT, 'Q');
 }
 
 void Engine::createStatusBar() {
@@ -1217,7 +1455,7 @@ void Engine::createStatusBar() {
     SendMessage(hStatus, SB_SETTEXT, 0, (LPARAM)TEXT("Ready"));
     SendMessage(hStatus, SB_SETTEXT, 1, (LPARAM)TEXT("Time: 0"));
     SendMessage(hStatus, SB_SETTEXT, 2, (LPARAM)TEXT("Moves: 0"));
-    SendMessage(hStatus, SB_SETTEXT, 4, (LPARAM)TEXT("v3.2.1")); // <3
+    SendMessage(hStatus, SB_SETTEXT, 4, (LPARAM)TEXT("v4")); // <3
 }
 
 void Engine::initWinapi() {
@@ -1248,6 +1486,7 @@ void Engine::initWinapi() {
     AppendMenu(gameThemePopup, MF_STRING, 1003, TEXT("Nature"));
     AppendMenu(gameThemePopup, MF_STRING, 2005, TEXT("Custom\tCTRL+ALT+B"));
     AppendMenu(gamePopup, MF_POPUP, (UINT_PTR)gameThemePopup, TEXT("Theme\tCTRL+B"));
+    AppendMenu(gamePopup, MF_STRING, STATISTICS, TEXT("Game stats"));
     AppendMenu(gamePopup, MF_SEPARATOR, 0, 0);
     AppendMenu(gamePopup, MF_STRING, SAVE_GAME, TEXT("Save game\tCTRL+S"));
     AppendMenu(gamePopup, MF_STRING, LOAD_GAME, TEXT("Load game\tCTRL+L"));
@@ -1318,7 +1557,7 @@ std::wstring Engine::ShowSaveDialog(HWND hwnd)
     return L"";
 }
 
-bool Engine::SaveGame() {
+bool Engine::SaveGame(bool showMessage) {
     if (winning || autoFinishRunning) {
         PushStatusMessage(L"Unable to save!");
         return false;
@@ -1332,7 +1571,7 @@ bool Engine::SaveGame() {
         std::string path = WideToString(rawPath.c_str());
         saveFilePath = path;
         SaveLastSavePath(rawPath);
-        ShowUserMessage("Your game will save every 1 minute automatically to selected save file", "Auto save", MB_OK | MB_ICONINFORMATION);
+        if(showMessage) ShowUserMessage("Your game will save every 1 minute automatically to selected save file", "Auto save", MB_OK | MB_ICONINFORMATION);
         selectedSaveFile = true;
     }
     Save(saveFilePath,cards, columns, bases, deck, revealedDeck, previousMoves, time, moves, currentSeed);
@@ -1481,7 +1720,8 @@ void Engine::handleMenu(int id) {
         break;
     case 1006:
     {
-        ShowUserMessage("Made by spikest3r\nolehsheremeta.com", "About Solitaire", MB_OK | MB_ICONINFORMATION);
+        /*ShowUserMessage("Made by spikest3r\nolehsheremeta.com", "About Solitaire", MB_OK | MB_ICONINFORMATION);*/
+        ShowAboutDialog();
         break;
     }
 
@@ -1510,6 +1750,7 @@ void Engine::handleMenu(int id) {
         if (success) {
             autoFinishAvail = deck.size() == 0 && revealedDeck.size() == 0;
             SetOptionAvailability(AUTO_FINISH, autoFinishAvail);
+            undidMovesCount++;
         }
         PushStatusMessage(success ? L"Undid move" : L"Nothing to undo");
         SetOptionAvailability(UNDO, !isLast);
@@ -1565,6 +1806,11 @@ void Engine::handleMenu(int id) {
         const char* status = currentSeed == 0 ? "\nNote: this save file doesn't contain seed information" : "\nSeed was copied to your clipboard";
         sprintf_s(buffer, 256, "Seed: %u%s", currentSeed, status);
         ShowUserMessage(buffer, "Current seed", MB_ICONINFORMATION | MB_OK);
+        break;
+    }
+    case STATISTICS:
+    {
+        ShowStatisticsDialog();
         break;
     }
     }
@@ -1730,6 +1976,74 @@ std::wstring Engine::LoadLastSavePath()
     return std::wstring(buffer);
 }
 
+bool Engine::SaveStatistics(int won, int lost)
+{
+    HKEY hKey;
+    LONG result = RegCreateKeyExW(
+        HKEY_CURRENT_USER,
+        L"Software\\Solitaire_spikest3r",
+        0,
+        nullptr,
+        REG_OPTION_NON_VOLATILE,
+        KEY_WRITE,
+        nullptr,
+        &hKey,
+        nullptr
+    );
+
+    if (result != ERROR_SUCCESS)
+        return false;
+
+    DWORD dwA = static_cast<DWORD>(won);
+    DWORD dwB = static_cast<DWORD>(lost);
+
+    result = RegSetValueExW(hKey, L"won", 0, REG_DWORD,
+        reinterpret_cast<const BYTE*>(&dwA), sizeof(dwA));
+    if (result != ERROR_SUCCESS) {
+        RegCloseKey(hKey);
+        return false;
+    }
+
+    result = RegSetValueExW(hKey, L"lost", 0, REG_DWORD,
+        reinterpret_cast<const BYTE*>(&dwB), sizeof(dwB));
+
+    RegCloseKey(hKey);
+    return result == ERROR_SUCCESS;
+}
+
+bool Engine::LoadStatistics(int& won, int& lost)
+{
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+        L"Software\\Solitaire_spikest3r",
+        0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return false;
+
+    DWORD dwA = 0, dwB = 0;
+    DWORD size = sizeof(DWORD);
+    DWORD type = 0;
+
+    LONG res = RegQueryValueExW(hKey, L"won", nullptr, &type,
+        reinterpret_cast<BYTE*>(&dwA), &size);
+    if (res != ERROR_SUCCESS || type != REG_DWORD) {
+        RegCloseKey(hKey);
+        return false;
+    }
+
+    size = sizeof(DWORD);
+    res = RegQueryValueExW(hKey, L"lost", nullptr, &type,
+        reinterpret_cast<BYTE*>(&dwB), &size);
+    if (res != ERROR_SUCCESS || type != REG_DWORD) {
+        RegCloseKey(hKey);
+        return false;
+    }
+
+    RegCloseKey(hKey);
+    won = static_cast<int>(dwA);
+    lost = static_cast<int>(dwB);
+    return true;
+}
+
 // ===============
 // = SEED DIALOG =
 // ===============
@@ -1791,4 +2105,122 @@ void Engine::SetWindowTitle(const char* additionalText) {
         sprintf_s(buffer, 4096, "%s - %s", ogTitle, additionalText);
         glfwSetWindowTitle(window, buffer);
     }
+}
+
+// =====================
+// = STATISTICS DIALOG =
+// =====================
+
+#define IDC_STATIC1 5670
+#define IDC_STATIC2 5671
+#define IDC_STATIC3 5672
+#define IDC_STATIC4 5673
+#define IDC_STATIC5 5674
+
+INT_PTR CALLBACK StatisticsDialProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_INITDIALOG: {
+        Engine* engine = reinterpret_cast<Engine*>(lParam);
+        if (!engine) return (INT_PTR)FALSE;
+
+        // Get stats from lParam or globals
+        int time = 0, moves = 0, undidMovesCount = 0;
+        int won = 0, lost = 0;
+
+        if (!engine->LoadStatistics(won, lost)) {
+            won = lost = 0;
+        }
+
+        engine->GetCurrentGameStats(moves, time, undidMovesCount);
+
+        // Build strings
+        char buffer1[256];
+        sprintf_s(buffer1, 256, "Time: %i", time);
+        char buffer2[256];
+        sprintf_s(buffer2, 256, "Moves: %i", moves);
+        char buffer3[256];
+        sprintf_s(buffer3, 256, "Undo count: %i", undidMovesCount);
+        char buffer4[256];
+        sprintf_s(buffer4, 256, "Total won: %i", won);
+        char buffer5[256];
+        sprintf_s(buffer5, 256, "Total lost: %i\nNote: New game counts as loss", lost);
+
+        // Set text to static controls
+        SetDlgItemTextA(hDlg, IDC_STATIC1, buffer1);
+        SetDlgItemTextA(hDlg, IDC_STATIC2, buffer2);
+        SetDlgItemTextA(hDlg, IDC_STATIC3, buffer3);
+        SetDlgItemTextA(hDlg, IDC_STATIC4, buffer4);
+        SetDlgItemTextA(hDlg, IDC_STATIC5, buffer5);
+
+        return (INT_PTR)TRUE;
+    }
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
+            EndDialog(hDlg, LOWORD(wParam));
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+    return (INT_PTR)FALSE;
+}
+
+void Engine::ShowStatisticsDialog() {
+    DialogBoxParam(NULL,
+        MAKEINTRESOURCE(9998),
+        hwnd,
+        StatisticsDialProc,
+        reinterpret_cast<LPARAM>(this));
+}
+
+// ====================
+// === ABOUT DIALOG ===
+// ====================
+
+#include <shellapi.h>
+#include <commctrl.h>
+
+INT_PTR CALLBACK AboutDialProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+
+    case WM_INITDIALOG: {
+        INITCOMMONCONTROLSEX icex{};
+        icex.dwSize = sizeof(icex);
+        icex.dwICC = ICC_LINK_CLASS;
+        InitCommonControlsEx(&icex);
+        return (INT_PTR)TRUE;
+    }
+
+    case WM_NOTIFY: {
+        LPNMHDR pNMHDR = (LPNMHDR)lParam;
+
+        if ((pNMHDR->idFrom == 8991 || pNMHDR->idFrom == 8992) &&
+            (pNMHDR->code == NM_CLICK || pNMHDR->code == NM_RETURN)) {
+
+            PNMLINK pNMLink = (PNMLINK)lParam;
+
+            ShellExecuteW(
+                NULL,
+                L"open",
+                pNMLink->item.szUrl,
+                NULL,
+                NULL,
+                SW_SHOWNORMAL
+            );
+        }
+        break;
+    }
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
+            EndDialog(hDlg, LOWORD(wParam));
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+
+    return (INT_PTR)FALSE;
+}
+void Engine::ShowAboutDialog() {
+    DialogBox(GetModuleHandle(NULL), MAKEINTRESOURCE(9997), hwnd, AboutDialProc);
 }

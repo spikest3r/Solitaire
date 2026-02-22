@@ -20,6 +20,8 @@
 #pragma comment(lib, "winmm.lib") 
 #pragma comment(lib, "Comctl32.lib")
 
+
+
 class Engine {
 public:
 	GLFWwindow* window;
@@ -29,7 +31,7 @@ public:
 	bool running();
 	WNDPROC ogWndProc;
 	void handleMenu(int id);
-	bool SaveGame();
+	bool SaveGame(bool showMessage = true);
 	bool LoadGame(std::wstring presetPath = L"");
 	void SetUserSavedGameFlag(bool flag) { userSavedGame = flag; }
 	bool GetUserSavedGameFlag() { return userSavedGame; }
@@ -46,6 +48,12 @@ public:
 	void killHotkeys();
 
 	int ShowUserMessage(const char* message, const char* caption, UINT type, bool ensureNoGamePause = false);
+	bool LoadStatistics(int& won, int& lost);
+	void GetCurrentGameStats(int& movesExt, int& timeExt, int& undidExt) {
+		movesExt = moves;
+		timeExt = time;
+		undidExt = undidMovesCount;
+	}
 private:
 	const char* ogTitle;
 
@@ -89,9 +97,10 @@ private:
 	float windowWidth, windowHeight; // window size
 
 	float cardAspect, cardScale, singleCardPixelWidth;
-	void renderCard(CardObject object, glm::vec3 position);
+	void renderCard(CardObject object, glm::vec3 position, float yRot = 0.0f, bool legal = false);
 	Shader textureShader;
 	Shader quadShader;
+	Shader wipeShader;
 	glm::mat4 proj;
 	GLbuffer cardQuad;
 	GLbuffer backgroundQuad;
@@ -149,7 +158,7 @@ private:
 	float verticalSpacing;
 	glm::vec3 revealedDeckPosition = glm::vec3(cardNdcX + 0.25f, cardNdcY + 0.5f, 0.0f);
 
-	void initCards(int userSeed = 0);
+	void initCards(int userSeed = 0, bool won = false);
 	bool loadSounds();
 	void playSound(LPCWSTR sound);
 
@@ -162,6 +171,7 @@ private:
 
 	void SavePreviousState();
 	bool LoadPreviousState(bool* isLast);
+	GameState* PeekPreviousState(bool* isLast);
 	void SetOptionAvailability(UINT option, bool flag);
 	void SetMenuItemText(HMENU hMenu, UINT itemId, const wchar_t* newText);
 
@@ -196,6 +206,7 @@ private:
 
 	bool SaveLastSavePath(const std::wstring& path);
 	std::wstring LoadLastSavePath();
+	bool SaveStatistics(int won, int lost);
 
 	float autoSaveCountDown = 60.0f; // every 1 minute
 
@@ -209,4 +220,9 @@ private:
 	LPCWSTR customDefLabel;
 
 	void SetWindowTitle(const char* additionalText);
+
+	void UpdateAnimations();
+	int undidMovesCount = 0;
+	void ShowStatisticsDialog();
+	void ShowAboutDialog();
 };
